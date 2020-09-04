@@ -1,0 +1,146 @@
+/**
+* cursor sprite for menu option selection
+* sorts options vertically, then attaches itself to first option
+* 
+* @param 1<int, 16bit>  input controller id
+*/
+.include "src/class/sprite/sprite.cursor.h"
+.section "sprite.cursor"
+
+  METHOD init
+  ;rep #$31
+  lda OBJECT.CALL.ARG.1,s
+  sta.b this.controller
+
+  lda #OBJECT.PROPERTIES.isOption
+  ldx #dimension.position.y + 1
+  jsr sort.library.reverse.byProperties
+
+  jsr iterator.library.reset
+
+  lda #OBJECT.PROPERTIES.isOption
+  jsl extern.iterator.each.byProperties
+  bcs +
+    TRIGGER_ERROR E_Todo
+
++
+
+  lda.w #OAM.PRIORITY.3
+  sta animation.buffer.flags
+
+  lda.w #ANIMATION.FLAGS.POSITION_ABSOLUTE
+  tsb animation.flags.static
+
+  lda.w #ANIMATION.FLAGS.IS_LOOPING
+  tsb animation.flags.static
+
+  lda #SPRITE.cursor.PTR
+  jsr sprite.library.startAnimation
+
+  jmp _bindToTarget
+
+  ;rts
+
+  METHOD pause
+  jmp sprite.library.pauseAnimation
+  ;rts
+
+  METHOD play
+  ;php
+  ;rep #$31
+  ldx this.controller
+  jsr core.input.get.trigger
+  bit.w #JOY_DIR_RIGHT
+  beq +
+    pha
+    CALL option.library.increase.MTD iterator.target
+    pla
++
+  bit.w #JOY_DIR_LEFT
+  beq +
+    pha
+    CALL option.library.decrease.MTD iterator.target
+    pla
++
+  bit.w #JOY_BUTTON_A
+  beq +
+    pha
+    CALL option.library.trigger.MTD iterator.target
+    pla
++
+  bit.w #JOY_DIR_DOWN
+  beq +
+    pha
+    lda #OBJECT.PROPERTIES.isOption
+    jsr iterator.library.next.byProperties
+    bcs ++
+      TRIGGER_ERROR E_Todo
+      stp
+
+++
+    jsr _bindToTarget
+    pla
++
+  bit.w #JOY_DIR_UP
+  beq +
+    pha
+    lda #OBJECT.PROPERTIES.isOption
+    jsr iterator.library.previous.byProperties
+    bcs ++
+      TRIGGER_ERROR E_Todo
+      stp
+
+++
+    jsr _bindToTarget
+    pla
++
+
+
+  jsr sprite.library.playAnimation
+.if IS_3D == 1
+  ;priority hack
+  lda #OAM.SORT_PRIORITY.CURSOR
+  sta dimension.position.sort
+.endif
+  rts
+
+_bindToTarget:
+  AX16
+  ;php
+  ;rep #$31
+  CALL option.library.getPosition.MTD iterator.target
+  txa
+  sec
+  sbc dimension.size.x
+  clc
+  adc.w #8
+  sta.b dimension.position.x + 1
+  tya
+  sec
+  sbc.w #6
+  sta.b dimension.position.y + 1
+
+/*
+  ;stupid hack, now obsolete thanks to absolute position flag.
+  jsr core.screen.getPosition
+
+  txa
+  clc
+  adc dimension.position.x +1
+  sta dimension.position.x +1
+
+  tya
+  clc
+  adc dimension.position.y +1
+  sta dimension.position.y +1
+*/
+  ;plp
+  rts
+  
+  METHOD kill
+  jmp sprite.library.kill
+  
+
+  CLASS sprite.cursor
+.ends	
+	

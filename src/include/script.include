@@ -1,0 +1,6 @@
+/**
+* Sequence scripting file includes
+*
+*/
+
+.include "src/main.script"

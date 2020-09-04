@@ -1,0 +1,263 @@
+/**
+* abstract textlayer methods
+*
+*/
+
+
+.include "src/class/background/textlayer/textlayer.library.h"
+.section "textlayer.library"
+
+/*
+  METHOD init
+  METHOD play
+  METHOD kill
+  TRIGGER_ERROR E_abstractClass
+*/
+
+/**
+*
+*/
+background.library.textlayer.allocateMemory:
+  AX16
+  ;php
+  sep #$20
+  lda #BG.LAYER.2
+  sta.b textlayer.bg
+
+  lda.b #PALETTE.BPP.2
+  sta background.tiles.bpp
+
+  rep #$31
+  lda textlayer.font.tiles.length
+  sta animation.tiles.length
+  lda textlayer.font.palette.length
+  sta animation.palette.length
+  lda.w #TILEMAP.SIZE.SINGLE
+  sta animation.tilemap.length
+  sta animation.frame.tilemap.length
+
+  jmp background.library.allocateMemory
+
+  ;plp
+  ;rts
+
+/*
+background.library.textlayer.stringToTilemap:
+  php
+  rep #$31
+
+  lda textlayer.flags
+  bit.w #TEXTBOX.FLAGS.SKIPWHITESPACE
+  bne background.library.textlayer.stringToTilemap.noWhitespace
+
+
+  ldx #0
+  ldy background.ramBuffer.start
+
+-   lda.w GLOBAL.CORE.STRING.buffer,x
+    and.w #$ff
+    sec
+    sbc.w #TEXTLAYER.WHITESPACE  ;shift back, whitespace starts at char 0 instead of $20
+    ora.w #BG.FORMAT.PRIORITY   ;set priority
+    ;clc
+    ;adc textlayer.font.tiles.start.id
+    sta.w GLOBAL.wramBuffer.start,y
+    lda textlayer.font.tiles.start.id
+    and.w #$ff
+    clc
+    adc.w GLOBAL.wramBuffer.start,y
+    sta.w GLOBAL.wramBuffer.start,y
+
+    inx
+    iny
+    iny
+    cpx.w #GLOBAL.CORE.STRING.buffer.length
+    bne -
+
+  plp
+  rts
+*/
+
+/*
+background.library.textlayer.stringToTilemap.noWhitespace:
+  ldx #0
+  ldy background.ramBuffer.start
+
+-   lda.w GLOBAL.CORE.STRING.buffer,x
+    and.w #$ff
+    sec
+    sbc.w #TEXTLAYER.WHITESPACE  ;shift back, whitespace starts at char 0 instead of $20
+    ;don't print whitespace
+    bit.w #TILEMAP.BITFLAG.TILE
+    beq +
+    ora.w #BG.FORMAT.PRIORITY   ;set priority
+      ;clc
+      ;adc textlayer.font.tiles.start.id
+      sta.w GLOBAL.wramBuffer.start,y
+      lda textlayer.font.tiles.start.id
+      and.w #$ff
+      clc
+      adc.w GLOBAL.wramBuffer.start,y
+      sta.w GLOBAL.wramBuffer.start,y
+
++
+    inx
+    iny
+    iny
+    cpx.w #GLOBAL.CORE.STRING.buffer.length
+    bne -
+
+  plp
+  rts
+*/
+
+
+background.library.textlayer.uploadFont:
+  AX16
+  ;php
+  sep #$20
+  tsx
+  lda #DMA_TRANSFER.VRAM    ;transfer type
+  pha
+  pei (textlayer.font.tiles)
+  lda.b textlayer.font.tiles+2      ;source bank
+  pha
+  rep #$31
+
+  ;pei (animation.tiles.start)
+  lda textlayer.font.tiles.start.id
+  and.w #$ff
+  asl a
+  asl a
+  asl a
+  asl a
+  clc
+  adc animation.tiles.start
+  pha
+  pei (textlayer.font.tiles.length)
+
+  jsr core.dma.registerTransfer
+
+  sep #$20
+  lda #DMA_TRANSFER.CGRAM   ;transfer type
+  pha
+
+  pei (textlayer.font.palette)
+  lda.b textlayer.font.palette+2        ;source bank
+  pha
+  rep #$31
+
+  pei (animation.palette.start)
+  pei (textlayer.font.palette.length)
+
+  jsr core.dma.registerTransfer
+
+  txs
+  ;plp
+  rts
+
+/**
+*
+* @param a  fill-value (tile id & config)
+* @param x, lo  horizontal pixel position
+* @param x, hi  horizontal pixel size
+* @param y  horizontal pixel position
+* @param y, hi  vertical pixel size
+*/
+/*
+background.library.textlayer.fill:
+  php
+  rep #$31
+  pha   ;9s fill value
+
+  txa
+  and.w #$ff
+  pha   ;7s h-pos
+  txa
+  xba
+  and.w #$ff
+  pha   ;5s h-size
+
+  tya
+  and.w #$ff
+  pha   ;3s v-pos
+  tya
+  xba
+  and.w #$ff
+  pha   ;1s v-size
+
+;vloop
+-
+    ;all lines complete?
+    lda 1,s
+    beq +
+
+      ;get line start tile, index into tilemap
+      lda 3,s
+      clc
+      adc 1,s
+      dec a
+      asl a
+      asl a
+      asl a
+      asl a
+      asl a
+      clc
+      adc 7,s
+      asl a
+      clc
+      adc background.ramBuffer.start
+      tax
+
+      ;get line length
+      lda 5,s
+      tay
+      
+      lda 9,s
+
+;hloop
+--
+        cpy.w #0
+        beq ++
+          
+        sta.w GLOBAL.wramBuffer.start,x
+        inx
+        inx
+        dey
+        bra --
+  
+
+;line done
+++
+    lda 1,s
+    dec a
+    sta 1,s
+    bra -
+
+
+;all lines done
++
+
+
+  ply
+  plx
+
+  ply
+  plx
+
+  pla
+
+  plp
+  rts
+
+background.library.textlayer.flush:
+  php
+  rep #$31
+  jsr background.library.textlayer.stringToTilemap
+  jsr background.library.uploadTilemap
+  plp
+  rts
+*/
+  ;CLASS textlayer.library
+
+.ends

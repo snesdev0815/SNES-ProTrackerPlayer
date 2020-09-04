@@ -1,0 +1,93 @@
+/**
+* option that triggers command on callee if selected
+*/
+.include "src/class/option/option.command.callback.h"
+.section "option.command.callback"
+
+  /**
+  * @param 1<int, 16bit>  xpos
+  * @param 2<int, 16bit>  ypos
+  * @param 3<int, 16bit>  callback command
+  * @param 4<object hash, 32bit>  target vwf textlayer to draw to
+  */
+  METHOD init
+  lda OBJECT.CALL.ARG.6,s
+  sta this.caller+2
+  lda OBJECT.CALL.ARG.7,s
+  sta this.caller
+
+  lda OBJECT.CALL.ARG.8,s
+  sta this.textlayer+2
+  lda OBJECT.CALL.ARG.9,s
+  sta this.textlayer
+
+  lda OBJECT.CALL.ARG.1,s
+  sta.b dimension.position.x + 1
+
+  lda OBJECT.CALL.ARG.2,s
+  sta.b dimension.position.y + 1
+
+  lda OBJECT.CALL.ARG.3,s
+  sta.b this.command
+
+  lda OBJECT.CALL.ARG.4,s
+  sta.b this.value.max
+
+  lda OBJECT.CALL.ARG.5,s
+  sta.b this.textstring
+
+  lda this.textstring
+  pei (option.value)
+  CALL background.textlayer.8x8.print.MTD this.textlayer
+  pla
+  rts
+
+
+  /**
+  *
+  */
+  METHOD trigger
+  pei (option.value)
+  pei (this.command)
+  CALL Script.oncommand.MTD this.caller
+  pla
+  pla
+  rts
+
+  /**
+  *
+  */
+  METHOD increase
+  inc option.value
+  lda option.value
+  cmp this.value.max
+  beq +
+  bcc +
+    stz option.value
+
++
+  bra _print
+
+
+  METHOD decrease
+  dec option.value
+  bpl +
+    lda this.value.max
+    sta option.value
+
++
+_print:
+  lda this.textstring
+  pei (option.value)
+  CALL background.textlayer.8x8.print.MTD this.textlayer
+  pla
+  CALL background.textlayer.8x8.flush.MTD this.textlayer
+  rts
+
+
+  METHOD kill
+  jmp object.library.kill
+
+  CLASS option.command.callback trigger increase decrease
+
+.ends	

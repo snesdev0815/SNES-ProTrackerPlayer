@@ -1,0 +1,93 @@
+/**
+* abstract option methods
+*
+*/
+
+
+.include "src/class/option/option.library.h"
+.section "option.library"
+
+/*
+  METHOD init
+  METHOD play
+  METHOD kill
+  METHOD trigger
+  METHOD increase
+  METHOD decrease
+  rep #$31
+  TRIGGER_ERROR E_abstractClass
+  rts
+*/
+
+/**
+*
+*/
+option.library.init:
+  php
+  rep #$31
+
+  pei (dimension.position.y + 1)
+  pei (dimension.position.x + 1)
+  CALL background.textlayer.8x8.setCursorPosition.MTD option.textlayer
+  pla
+  pla
+
+  ;lda #T_playSong.PTR
+  lda option.textstring.id
+  pei (option.value)
+  CALL background.textlayer.8x8.print.MTD option.textlayer
+  pla
+  plp
+  rts
+
+/**
+*
+*/
+option.library.refresh:
+  php
+  sep #$20
+  lda option.value
+  and #$f
+  sta option.value
+  rep #$31
+  pei (dimension.position.y + 1)
+  pei (dimension.position.x + 1)
+  CALL background.textlayer.8x8.setCursorPosition.MTD option.textlayer
+
+  pla
+  pla
+  
+  ;lda #T_playSong.PTR
+  lda option.textstring.id
+  pei (option.value)
+  CALL background.textlayer.8x8.print.MTD option.textlayer
+  pla
+  CALL background.textlayer.8x8.flush.MTD option.textlayer
+  plp
+  rts
+
+/**
+*
+*/
+option.library.increase:
+  php
+  sep #$20
+  inc.b option.value
+  jsr option.library.refresh
+  plp
+  rts
+
+/**
+*
+*/
+option.library.decrease:
+  php
+  sep #$20
+  dec.b option.value
+  jsr option.library.refresh
+  plp
+  rts
+ 
+  CLASS option.library trigger increase decrease
+
+.ends

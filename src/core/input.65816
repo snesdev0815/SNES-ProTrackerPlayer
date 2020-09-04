@@ -1,0 +1,414 @@
+/**
+* controller/joypad input handler
+*
+* reads multiple joypads
+*
+*/
+.include "src/core/input.h"
+.section "core.input"
+
+core.input.init:
+  AX16
+  sep #$20
+  lda #1
+  sta.w CheckJoypadMode
+  rep #$31
+  ldx #INPUT.DEVICE.ID.0
+  jsr core.input.reset
+  ldx #INPUT.DEVICE.ID.1
+  jsr core.input.reset
+  ldx #INPUT.DEVICE.ID.2
+  jsr core.input.reset
+  ldx #INPUT.DEVICE.ID.3
+  jsr core.input.reset
+  ldx #INPUT.DEVICE.ID.4
+  jsr core.input.reset  
+  ldx #INPUT.DEVICE.ID.5
+  jsr core.input.reset  
+  ldx #INPUT.DEVICE.ID.6
+  jsr core.input.reset
+  ldx #INPUT.DEVICE.ID.7
+  jmp core.input.reset
+
+
+/**
+* @param a<int,16bit> button mask
+* @param x<int,8bit> input device id
+*/
+core.input.setMask:
+  AX16
+  jsr _getInputDevicePointer
+  sta.w inputDevice.mask,x
+  rts
+
+/**
+* @param x<int,8bit> input device id
+*/
+core.input.get.press:
+  AX16
+  jsr _getInputDevicePointer
+  lda.w inputDevice.press,x
+  and.w inputDevice.mask,x
+  rts
+
+
+/**
+* @param x<int,8bit> input device id
+*/
+core.input.get.release:
+  AX16
+  jsr _getInputDevicePointer
+  lda.w inputDevice.press,x
+  eor.w #$ffff
+  and.w inputDevice.old,x
+  rts
+
+
+/**
+* @param x<int,8bit> input device id
+*/
+core.input.get.trigger:
+  AX16
+  jsr _getInputDevicePointer
+  lda.w inputDevice.trigger,x
+  and.w inputDevice.mask,x
+  rts
+
+core.input.getAll.trigger:
+  AX16
+  ldy.w #INPUT.DEVICE.ID.0
+-
+  tyx  
+  jsr _getInputDevicePointer
+  lda.w inputDevice.trigger,x
+  and.w inputDevice.mask,x
+  sec
+  bne +
+    iny
+    cpy.w #INPUT.DEVICE.ID.4
+    bne -
+
+    clc
++  
+  rts
+
+
+extend.input.get.trigger:
+  AX16
+  jsr _getInputDevicePointer
+  lda.w inputDevice.trigger,x
+  and.w inputDevice.mask,x
+  rtl
+
+core.input.get.pressTrigger:
+  AX16
+  jsr _getInputDevicePointer
+  lda.w inputDevice.press,x
+  and.w inputDevice.mask,x
+  tay
+  lda.w inputDevice.trigger,x
+  and.w inputDevice.mask,x  
+  rts
+
+/**
+* @param x<int,8bit> input device id
+*
+* WARNING: calling this doesnt make much sense, because unconnected joypad & connected joypad are indistinguishable for the SNES!!! Only special controllers can be detected this way!
+*/
+core.input.isConnected:
+  AX16
+  jsr _getInputDevicePointer
+  lda.w inputDevice.trigger,x
+  bit.w #JOY_BUTTON_SIGNATURE
+  bne + ;just connected? report as unconnected (debounce)
+
+  lda.w inputDevice.press,x
+  and.w #JOY_BUTTON_SIGNATURE
+  cmp.w #JOY_BUTTON_SIGNATURE
+  bne +
+    sec
+    rts
+
++
+  clc
+  rts
+
+/**
+* this is a bit of a hack. used so that actions triggered dont trigger subsequent checkloops running on the same frame
+*
+* @param a<int,16bit>   mask of input bits to clear
+* @param x<int,8bit> input device id
+*/
+core.input.clear.trigger:
+  AX16
+  jsr _getInputDevicePointer
+  eor.w #$ffff
+  and.w inputDevice.trigger,x
+  sta.w inputDevice.trigger,x
+  rts
+
+/**
+* this is a bit of a hack. used so that actions triggered dont trigger subsequent checkloops running on the same frame
+*
+* @param a<int,16bit>   mask of input bits to clear
+* @param x<int,8bit> input device id
+*/
+core.input.clear:
+  AX16
+  jsr _getInputDevicePointer
+  eor.w #$ffff
+  pha
+  and.w inputDevice.trigger,x
+  sta.w inputDevice.trigger,x
+  pla
+  and.w inputDevice.press,x
+  sta.w inputDevice.press,x
+
+  rts
+
+
+/**
+* @param x<int,8bit> input device id
+* @return x<int,16bit> input device pointer
+*/
+_getInputDevicePointer:
+  AX16
+  pha
+  txa
+  and.w #$ff
+.if DEBUG == 1  
+  cmp #INPUT.DEVICE.ID.MAX
+  bcc +
+	pha
+	TRIGGER_ERROR E_BadInputDevice
+
++
+.endif
+  asl a
+  asl a
+  asl a
+  tax
+  pla
+  rts
+
+
+
+/**
+* @param x<int,8bit> input device id
+*/
+core.input.resetMask:
+  AX16
+  lda #$ffff
+  jmp core.input.setMask
+
+
+;fast multiplayer checker. check this late in nmi so we don't have to wait for auto joypad read to finish:
+CheckJoypadThreePlayers:
+  A8
+-
+    lda.w HVBJOY
+    bit.b #HVBJOY_AUTO_JOY_STATUS
+    bne -
+
+  ;always read port 2/3 data, never 4/5
+  lda.b #WRIO_JOY2_IOBIT_LATCH
+  sta.w WRIO
+  rep #$30
+
+  ldx.w #INPUT.DEVICE.ID.0
+  lda.w JOY1L
+  jsr core.input.update
+
+  ldx.w #INPUT.DEVICE.ID.1
+  lda.w JOY2L
+  jsr core.input.update
+
+  ldx.w #INPUT.DEVICE.ID.2
+  lda.l JOY4L
+  jmp core.input.update
+
+
+CheckJoypadFivePlayers:
+  A8
+-
+    lda.w HVBJOY
+    bit.b #HVBJOY_AUTO_JOY_STATUS
+    bne -
+
+  lda.b #0
+  sta.w WRIO
+
+  rep #$31
+  ldx.w #16
+-
+    lda.w JOYSER1
+    lsr a
+    rol.w player4
+    lsr a
+    rol.w player5
+    dex
+    bne -
+
+  sep #$20
+
+  lda.b #WRIO_JOY2_IOBIT_LATCH
+  sta.w WRIO
+  rep #$30
+
+  ldx.w #INPUT.DEVICE.ID.0
+  lda.w JOY1L
+  jsr core.input.update
+
+  ldx.w #INPUT.DEVICE.ID.1
+  lda.w JOY2L
+  jsr core.input.update
+
+  ldx.w #INPUT.DEVICE.ID.2
+  lda.l JOY4L
+  jsr core.input.update
+
+  ldx.w #INPUT.DEVICE.ID.3
+  lda.w player4
+  jmp core.input.update
+
+.macro JOYSERCHECKPLAYERFOUR
+    lda.w JOYSER1
+    lsr a
+    rol.w player4
+.endm
+
+core.input.refresh:
+CheckJoypadFourPlayers:
+  A8
+-
+    lda.w HVBJOY
+    bit.b #HVBJOY_AUTO_JOY_STATUS
+    bne -
+
+  lda.b #0
+  sta.w WRIO
+
+  rep #$31
+.rept 16
+  JOYSERCHECKPLAYERFOUR
+.endr
+  sep #$20
+
+  lda.b #WRIO_JOY2_IOBIT_LATCH
+  sta.w WRIO
+  rep #$30
+
+  ldx.w #INPUT.DEVICE.ID.0
+  lda.w JOY1L
+  jsr core.input.update
+
+  ldx.w #INPUT.DEVICE.ID.1
+  lda.w JOY2L
+  jsr core.input.update
+
+  ldx.w #INPUT.DEVICE.ID.2
+  lda.l JOY4L
+  jsr core.input.update
+
+  ldx.w #INPUT.DEVICE.ID.3
+  lda.w player4
+  jmp core.input.update
+
+;put this here to denote multitap compatibility
+.db "START OF MULTI5 BIOS"
+
+;in: x: port id (0 or 1)
+core.input.checkMultitapConnected:
+  AX16
+  phb
+  jsr core.nmi.stop
+  sep #$20
+  lda #REGS
+  pha
+  plb
+
+  lda.b #JOYSER0_LATCH
+  sta.w JOYSER0
+  ldy.w #8
+
+-
+    lda.w JOYSER0,x
+    lsr a
+    lsr a
+    rol.w porta
+
+    dey
+    bne -
+
+  lda.b #0
+  sta.w JOYSER0
+  ldy.w #8
+
+-
+    lda.w JOYSER0,x
+    lsr a
+    lsr a
+    rol.w portb
+
+    dey
+    bne -
+
+  jsr core.nmi.start
+  lda.w porta
+  lda.w portb
+  lda.w porta
+  cmp.b #$ff
+  bne +
+
+  lda.w portb
+  cmp.b #$ff
+  beq +
+
+  plb
+  rep #$31
+  sec
+  rts
+
++
+  plb
+  rep #$31
+  rts
+
+/**
+* @param x<int,8bit> input device id
+*/
+core.input.reset:
+  AX16
+  jsr core.input.resetMask
+  stz.w inputDevice.trigger,x
+  stz.w inputDevice.old,x
+  stz.w inputDevice.press,x
+  rts
+
+core.input.update:
+  AX16
+  ;only proceed if this looks like a valid joypad
+  bit.w #JOY_BUTTON_SIGNATURE
+  bne core.input.reset
+
+  ora.w #JOY_BUTTON_SIGNATURE
+  pha
+  txa
+  and.w #$ff
+  asl a
+  asl a
+  asl a
+  tax
+  
+  lda.w inputDevice.press,x	;get last button state
+  sta.w inputDevice.old,x
+  eor.w #$ffff			;xor
+  sta.w inputDevice.trigger,x
+  pla
+  sta.w inputDevice.press,x
+  and.w inputDevice.trigger,x	;and and only get buttons that werent pressed last frame
+  sta.w inputDevice.trigger,x	;store in joypad buffer
+  rts
+
+.ends
+

@@ -1,0 +1,18 @@
+/**
+* OAM sprite animation file includes, lookup tables and custom definitions
+*
+*/
+
+.Section "SpriteAnimationLUT" superfree
+SpriteAnimationLUT:
+  .dw 0 ;dummy entry, first one must be clear
+  .db 0
+  PTRLONG SpriteAnimationLUT SPRITE.cursor
+
+
+.ends
+
+.base BSL
+.bank BANK.DATA
+
+    SPRITE_ANIMATION cursor

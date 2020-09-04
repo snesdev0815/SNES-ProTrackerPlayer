@@ -1,0 +1,40 @@
+/**
+* Class/Object lookup tables
+*
+*/
+
+;spit out globally unique obj-ids. order does not matter. reason for this hack is that wla dx is unable to calculate global count
+.enum 0 export
+OBJID.iterator.library db
+OBJID.sprite.library db
+OBJID.Script  db
+
+OBJID.Brightness db
+OBJID.background.generic db
+OBJID.background.textlayer.8x8 db
+OBJID.option.command.callback db
+OBJID.sprite.cursor db
+
+MAXOBJID  ds 0
+.ende
+
+
+.base BSL
+.bank BANK.PROGRAM
+
+;interfaces
+.include "src/class/default/default.interface"
+.include "src/class/dimension/dimension.interface"
+
+.section "OopClassWordLut"
+OopClassWordLut:
+  PTRNORM OopClassWordLut iterator.library.CLS
+  PTRNORM OopClassWordLut sprite.library.CLS
+  PTRNORM OopClassWordLut Script.CLS
+
+  PTRNORM OopClassWordLut Brightness.CLS
+  PTRNORM OopClassWordLut background.generic.CLS
+  PTRNORM OopClassWordLut background.textlayer.8x8.CLS
+  PTRNORM OopClassWordLut option.command.callback.CLS
+  PTRNORM OopClassWordLut sprite.cursor.CLS
+.ends

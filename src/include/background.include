@@ -1,0 +1,7 @@
+
+.Section "BackgroundAnimationLUT" superfree
+BackgroundAnimationLUT:
+    .dw 0
+    .dw 0
+.ends
+

@@ -1,0 +1,36 @@
+/**
+* Audio file includes and custom definitions
+*
+*/
+
+
+
+
+.Section "Audio Player" superfree
+spc700.code:
+  .incbin "build/src/audio/apucode.bin.lz4"
+.ends
+
+
+.section "samplepack0" superfree
+SamplePack0:
+.ends
+
+
+.Section "SamplePackLUT" superfree
+SamplePackLUT:
+    .dw 0
+    .dw 0
+.ends
+
+.Section "SongLUT" superfree
+SongLUT:
+ .db 0,0,0
+ PTRLONG SongLUT Song.mo_lgnd
+.ends
+
+    SONG mo_lgnd mo_lgnd
+
+.enum 0 export
+    AUDIO.SAMPLEPACK.MAX ds 0
+.ende

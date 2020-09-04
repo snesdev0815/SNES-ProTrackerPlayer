@@ -1,0 +1,67 @@
+;just a static hook for sort so that out-of-bounds sorts can happen after objects of a frame have been processed
+;(reason: if sorting inside object, it's possible to sort objects in such a way, that some get executed twice, some not at all for a given frame)
+
+.include "src/core/sort.h"
+.section "sort"
+
+/*
+core.sort.init:
+  AX16
+  ;php
+  phd
+  ;rep #$31
+  pea ZP.SORT
+  pld
+  stz sort.properties
+  stz sort.attribute
+
+  pld
+  ;plp
+  rts
+*/
+
+/**
+*
+*/
+/*
+core.sort.play:
+  AX16
+  ;php
+  phd
+  ;rep #$31
+  pea ZP.SORT
+  pld
+  lda sort.properties
+  beq +
+    ldx sort.attribute
+    jsr sort.library.byProperties.once
+    stz sort.properties
+
++
+
+  pld
+  ;plp
+  rts
+*/
+
+/**
+* @param a <int, 16bit> sort properties
+* @param x <int, 16bit> sort attribute
+*/
+/*
+core.sort.register:
+  AX16
+  ;php
+  phd
+  ;rep #$31
+  pea ZP.SORT
+  pld
+  sta sort.properties
+  stx sort.attribute
+
+  pld
+  ;plp
+  rts
+*/
+.ends
+

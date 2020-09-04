@@ -1,0 +1,70 @@
+.include "src/core/header.h"
+
+.org $ffc0
+.section "header hack" force
+  .db "PRO TRACKER PLAYER   "
+  ;.db $35   ;exhirom mapping   
+  .db $31  ;normal hirom mapping
+.if USE_FLASH_SAVE == 1    
+  .db $1  ;cartridgetype rom+ram
+.else  
+  .db $2  ;cartridgetype sram + batt
+.endif  
+  .db 6  ;romsize
+.if USE_FLASH_SAVE == 1
+  .db 0 ;no sram
+.else
+	.if RECORD_DEMO == 1
+		.db 5 ;sramsize
+	.else
+  		.db 1 ;sramsize
+	.endif  
+.endif  
+  .db 0 ;country
+  .db $33	;license code, extended header
+  .db 0 ;version
+checksum.rom.xor:
+  .dw $ffff
+checksum.rom:
+  .dw $0000
+.ends
+
+.org $FFB0
+.section "extended header" force
+	.db "DL"	;extended maker code. DL = Dieter von Laser
+	.db "BPPJ"	;extended game code. U == unlicensed/homebrew
+	.db 0,0,0,0,0,0	;reserved
+.if USE_FLASH_SAVE == 1    	
+	.db 9	;4mbit expansion flash
+.else	
+	.db 0	;no expansion flash
+.endif	
+	.db 0	;no expansion ram
+	.db 0	;no special version
+	.db 0	;no chipset subtype
+.ends
+
+.bank 0 slot 0
+.org $ffe4
+.section "native vector hack" force
+	.dw StopCop
+	.dw Stop
+checksum.kernel.xor:
+	.dw $ffff
+	.dw NmiHandler
+checksum.kernel:
+	.dw $0000
+	.dw IrqHookUp
+.ends
+
+.org $fff4
+.section "emu vector hack" force
+	.dw StopCop
+	.dw EmptyHandler
+	.dw EmptyHandler
+	.dw EmptyHandler
+	.dw Boot
+	.dw 0   ;must be 0 because this is bank of reset jump
+.ends
+
+.bank BANK.PROGRAM

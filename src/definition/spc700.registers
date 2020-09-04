@@ -1,0 +1,63 @@
+;adapted from: https://github.com/mukunda-/snesmod/blob/master/driver/spc/sm_spc.asm
+
+.def SPC_TEST		$0F0 ; undocumented
+.def SPC_CONTROL	$0F1 ; control register
+.def SPC_DSP		$0F2
+.def SPC_DSPA		$0F2
+.def SPC_DSPD		$0F3
+.def SPC_PORT0		$0F4 ; i/o port0
+.def SPC_PORT1		$0F5 ; i/o port1
+.def SPC_PORT2		$0F6 ; i/o port2
+.def SPC_PORT3		$0F7 ; i/o port3
+.def SPC_FLAGS		$0F8 ; custom flags
+.def SPC_TIMER0		$0FA ; timer0 setting
+.def SPC_TIMER1		$0FB ; timer1 setting
+.def SPC_TIMER2		$0FC ; timer2 setting
+.def SPC_COUNTER0	$0FD ; timer0 counter
+.def SPC_COUNTER1	$0FE ; timer1 counter
+.def SPC_COUNTER2	$0FF ; timer2 counter
+.def DSPV_VOLL		$00
+.def DSPV_VOLR		$01
+.def DSPV_PL		$02
+.def DSPV_PH		$03
+.def DSPV_SRCN		$04
+.def DSPV_ADSR1		$05
+.def DSPV_ADSR2		$06
+.def DSPV_GAIN		$07
+.def DSPV_ENVX		$08
+.def DSPV_OUTX0		$09
+.def DSPV_OUTX1		$19
+.def DSPV_OUTX2		$29
+.def DSPV_OUTX3		$39
+.def DSPV_OUTX4		$49
+.def DSPV_OUTX5		$59
+.def DSPV_OUTX6		$69
+.def DSPV_OUTX7		$79
+.def DSP_MVOLL		$0C
+.def DSP_MVOLR		$1C
+.def DSP_EVOLL		$2C
+.def DSP_EVOLR		$3C
+.def DSP_KON		$4C
+.def DSP_KOF		$5C
+.def DSP_FLG		$6C
+.def DSP_ENDX		$7C
+.def DSP_EFB		$0D
+.def DSP_PMON		$2D
+.def DSP_NON		$3D
+.def DSP_EON		$4D
+.def DSP_DIR		$5D
+.def DSP_ESA		$6D
+.def DSP_EDL		$7D
+.def DSP_C0			$0F
+.def DSP_C1			$1F
+.def DSP_C2			$2F
+.def DSP_C3			$3F
+.def DSP_C4			$4F
+.def DSP_C5			$5F
+.def DSP_C6			$6F
+.def DSP_C7			$7F
+.def FLG_RESET		$80
+.def FLG_MUTE		$40
+.def FLG_ECEN		$20
+
+.def IPL_ROM		$ffc0

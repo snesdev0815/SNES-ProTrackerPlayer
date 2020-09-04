@@ -1,0 +1,3227 @@
+;----------------------------------------------------------------------------------------
+;pro tracker (mod) player for the spc700
+;----------------------------------------------------------------------------------------
+
+.MEMORYMAP					; Tell WLA that the SPC has RAM at locations ;$0000-$ffff in every bank
+SLOTSIZE $10000			; and that this area is $10000 bytes in size.
+DEFAULTSLOT 0				; There is only a single slot in SNES, other consoles
+SLOT 0 $0000				; may have more slots per bank.
+.ENDME
+
+.ROMBANKSIZE $10000		; Every ROM bank is 64 KBytes in size
+.ROMBANKS 1
+;----------------------------------------------------------------------------------------
+
+.include "src/audio/apucode.h"
+
+.BANK 0 SLOT 0
+
+
+.ORGA (CODE.START-4)
+.DW spc.code.end-spc.block.start
+spc.block.start:
+.DW CODE.START          ;spcram copy offset
+
+spc.code.start:
+BootInit:
+  clrp
+  mov SPC_CONTROL,#$f0
+  mov a,#$ff
+  mov !$fff0,a
+
+  ;set stack pointer (old: $cf)
+  mov x,#(STACK.START & $ff)
+  mov sp,x
+  mov a,#$00
+  mov x,a
+
+ClearVariables:
+    mov (x)+,a
+    cmp x,#$f0
+    bne ClearVariables
+
+  mov MainVolL,#AUDIO.VOLUME.FULL
+  mov MainVolTargetL,#AUDIO.VOLUME.FULL
+  mov MainVolR,#AUDIO.VOLUME.FULL
+  mov MainVolTargetR,#AUDIO.VOLUME.FULL
+  mov EchoVolL,#ECHO.VOLUME
+  mov EchoVolR,#ECHO.VOLUME
+  mov ChannelEnable,#$3f
+  mov ChannelEchoEnable,#$ff
+
+  mov SoundEffectCounter, #0
+  ;reset report type to void
+  mov SpcReportType,#0
+  
+  ;init volume
+  mov MusicVol,#$30
+
+  ;setup mod pointer
+  mov SpcDataPointerLo,#(SOUNDEFFECT.SAMPLES.START & $00ff)
+  mov SpcDataPointerHi,#(SOUNDEFFECT.SAMPLES.START >> 8)
+
+  call !SetupDspRegsAndTimers
+  call !InitVariables
+  call !ClearAllChannelArray
+  call !UpdateVolEchoVariablesOnly
+
+
+MainLoop:
+  mov a,Timer0Target+1
+  beq +
+    ;use timer1 for "big waits" for slow tempo/bpm
+    asl a
+    asl a
+    asl a
+    asl a
+    mov y,a
+    mov a,SPC_COUNTER1 ;clear 4bit counter
+-
+      mov a,SPC_COUNTER1   ;wait for 2mS
+      beq -
+
+      dbnz  y, -
++
+
+  ;clear counter0
+  mov a,SPC_COUNTER0
+
+  ;wait for counter 0 to become zero (tempo/bpm)
+-
+	mov a,SPC_COUNTER0
+  beq -
+
+  call !MainWaitLoop		
+  call !SendReportData
+  call !FadeMainVolume
+
+  ;check if command present on port0
+  mov a,SPC_PORT0
+  and a,#$f0
+  cmp a,#$f0
+  bne MainLoop	;return to mainloop if there isn't
+
+  call !ProcessCommand
+  bra MainLoop
+
+ProcessCommand:  
+  ;get command
+  mov a,SPC_PORT0
+  and a,#$0f	
+  asl a
+  mov x,a
+  jmp [!CommandJumpTable+x]
+
+PlaySoundEffectTramp:
+	jmp !PlaySoundEffect
+
+CommandJumpTable:
+  .dw ResetHandler			;0
+  .dw ReceiveSong
+  .dw CommandVoid
+  .dw CommandVoid
+  .dw CommandVoid
+  .dw CommandSetPatternPosition ;5
+  .dw CommandSetEchoVolume
+  .dw CommandVoid
+  .dw ReceiveSamplePack
+  .dw CommandVoid
+  .dw PlaySoundEffect		;10
+  .dw StopSongStream
+  .dw SetSongSpeed
+  .dw SetSongChannelMask
+  .dw SetReportType
+  .dw SetMasterVolume
+
+
+ReceiveSong:
+  ;timers must be reset before receiving a song, else we can't wait properly for the echo buffer to initialize
+  call !ReceiveSongHandler
+  call !SetupSamples
+  call !SetupDspRegsAndTimers
+  call !InitVariables
+  call !ClearAllChannelArray
+  call !UpdateVolEchoVariablesOnly
+  ret
+
+ResetHandler:
+	;clear apu ports:
+	mov	y,#COMMAND.Reset
+	mov	SPC_PORT0,y
+	mov	y,#$00
+	mov	SPC_PORT0,y
+	mov	SPC_PORT1,y
+	mov	SPC_PORT2,y
+	mov	SPC_PORT3,y
+
+	;clear dsp regs:
+	mov	a,#DSP_FLG
+	mov	y,#$e0		;reset dsp, mute on, echo off
+	movw	SPC_DSP,ya
+	mov	a,#DSP_MVOLL
+	movw	SPC_DSP,ya
+	mov	a,#DSP_MVOLR
+	movw	SPC_DSP,ya
+	mov	a,#DSP_EVOLL
+	movw	SPC_DSP,ya
+	mov	a,#DSP_EVOLR
+	movw	SPC_DSP,ya
+	mov	a,#DSP_KON
+	movw	SPC_DSP,ya
+	mov	y,#$ff
+	mov	a,#DSP_KOF
+	movw	SPC_DSP,ya
+	mov	y,#$00
+	mov	a,#DSP_EFB
+	movw	SPC_DSP,ya
+	mov	a,#DSP_PMON
+	movw	SPC_DSP,ya
+	mov	a,#DSP_NON
+	movw	SPC_DSP,ya
+	mov	a,#DSP_EON
+	movw	SPC_DSP,ya
+	mov	a,#DSP_DIR
+	movw	SPC_DSP,ya
+	mov	a,#DSP_ESA
+	movw	SPC_DSP,ya
+	mov	a,#DSP_EDL
+	movw	SPC_DSP,ya
+	mov	SPC_CONTROL,#$f0
+
+  	;jump to ipl rom:
+	jmp	!IPL_ROM
+
+MainWaitLoop:
+  mov a,$ef
+  and a, #%00000101
+  cmp a, #%00000101
+  beq MainWaitLoopSongPresent
+	ret
+	
+MainWaitLoopSongPresent:
+	inc	WaitCounter
+
+InnerWaitLoop:
+	cmp	WaitCounter,PatternSpeed			;old #$04 incremet WaitCounter until 4, selfmodying code changes the default speed(command setspeed0x0f) by writing to the second operand
+	bne	UpdateTickBasedEffectsOnly
+
+	mov	WaitCounter,#$00
+	mov	y,NextRowChFadeOuts
+	mov	a,#DSP_KOF
+	movw	SPC_DSPA,ya
+	mov	a,SPC_COUNTER1	;clear 4bit counter
+	mov	y,#2
+KofWaitLoop:
+	mov	a,SPC_COUNTER1		;wait for 2mS
+	beq	KofWaitLoop
+  	;**************************************************
+	dbnz	y,KofWaitLoop
+
+	call	 !ProcessNextRow
+
+	call	!PreTestRow
+	ret
+
+UpdateTickBasedEffectsOnly:
+    mov CurrentChannel,#$00
+-     mov a,CurrentChannel
+      cmp a,ChannelCount
+      beq +
+
+      lsr a
+      lsr a
+      lsr a
+      mov x,a
+      mov a,ChannelArrayPointer+x
+      mov y,(ChannelArrayPointer+1)+x
+      movw CurrentChDataLo,ya
+
+      call  !UpdateTargetVolumeTickBased
+      call  !CheckForTickBasedEffects
+
+      clrc
+      adc CurrentChannel,#$10
+      bra -
++
+
+	mov	a,TickSampleStart
+	beq UpdateTickBasedEffectsOnlyNoRetrigger
+
+	mov	SPC_DSP,#DSP_KON
+	mov	SPC_DSPD,a							;retrigger recently started samples
+	
+	mov	TickSampleStart,#0
+UpdateTickBasedEffectsOnlyNoRetrigger:
+
+	ret
+
+
+ProcessNextRow:
+	movw	ya,CurrentPatternPointerLo	;mark beginning of current row
+	movw	CurrentRowPointerLo,ya
+
+	mov	KeyOn,#$00			;clear key on
+
+  	mov CurrentChannel,#$00
+-     mov a,CurrentChannel
+      cmp a,ChannelCount
+      beq +
+
+      lsr a
+      lsr a
+      lsr a
+      mov x,a
+      mov a,ChannelArrayPointer+x
+      mov y,(ChannelArrayPointer+1)+x
+      movw CurrentChDataLo,ya
+
+      call !GetDataFromPattern
+      call !SetVolume
+
+
+      clrc
+      adc CurrentChannel,#$10
+      bra -
++
+
+	call	!KeyOnKeyOff
+	call	!PatternLoopJumper
+	jmp	!GetDataFromPatternCheckPatternPosition
+
+
+GetDataFromPatternEntryIsVoid:
+	incw	CurrentPatternPointerLo
+	mov	y,#channel.instrument
+	mov	a,#$ff					;store $ff in all 4 channel input buffers
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	[CurrentChDataLo]+y,a
+	ret
+
+
+GetDataFromPattern:
+	mov	y,#channel.instrument
+	mov	a,[CurrentChDataLo]+y			;get last rows instrument, pitch and effects
+	mov	TempBuffer1,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer5,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer6,a
+	or	 TempBuffer1,TempBuffer2
+	or	 TempBuffer1,TempBuffer5
+	or	 TempBuffer1,TempBuffer6			;check if a note was present
+	mov	a,TempBuffer1
+	bne	GetDataFromPatternEntryContainsNewData
+	call	!GetPitchFromBufferAndSet
+
+GetDataFromPatternEntryContainsNewData:
+	mov	y,#$00
+	mov	a,[CurrentPatternPointerLo]+y
+	cmp	a,#$ff			;compare if channel entry is $ff(skip)
+	beq	GetDataFromPatternEntryIsVoid
+
+  ;there is a new note to trigger, copy data from pattern to current channel data buffer:
+	mov	[CurrentChDataLo]+y,a	;copy instrument
+	inc	y
+	mov	a,[CurrentPatternPointerLo]+y			;copy note
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,[CurrentPatternPointerLo]+y			;copy effect
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,[CurrentPatternPointerLo]+y			;copy effect data
+	mov	[CurrentChDataLo]+y,a
+	incw	CurrentPatternPointerLo
+	incw	CurrentPatternPointerLo
+	incw	CurrentPatternPointerLo
+	incw	CurrentPatternPointerLo
+
+	mov	y,#channel.effect
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	mov	TempBuffer1,a
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$f0
+	or	a,TempBuffer1
+	cmp	a,#$de					;delay sample effect present? if yes, don't trigger sample
+	beq DontSetNewSample
+	
+	call	!SetNewSample
+	
+DontSetNewSample:
+	ret
+	
+SetNewSample:		
+	mov	y,#channel.instrument						;a non-present instrument is indicated by $00
+	mov	a,[CurrentChDataLo]+y
+	beq	GetDataFromPatternInstrumentIsVoid
+
+	;trigger new instrument, fetch sample data for current instrument
+	dec	a							;multiply instrument number with 8 to get pointer into sample array
+	mov	y,#$08
+	mul	ya
+	addw	ya,ModFilePointer2Lo				
+	movw	TempBuffer1,ya					;tempbuffer1 is now pointer to current sample entry
+
+	/*
+		dont update finetune if note doesnt retrigger
+		just a guessed hack that fixes "tempest - arctic listeria"
+		no idea if this truly is intended behaviour
+	*/
+	mov	y,#channel.note
+	mov	a,[CurrentChDataLo]+y
+	cmp	a,#$ff					;a non-present note is indicated by $ff
+	beq	+
+		mov	y,#SPCMOD.INSTRUMENT.FINETUNE						;get sample finetune
+		mov	a,[TempBuffer1]+y
+		mov	y,#channel.finetune						;save to current channel finetune
+		mov	[CurrentChDataLo]+y,a
+
++
+	;get sample volume
+	mov	y,#SPCMOD.INSTRUMENT.VOLUME
+	mov	a,[TempBuffer1]+y
+	mov	CurrentVolume,a					;save to current volume and current channel volume
+	mov	y,#channel.current_volume
+	mov	[CurrentChDataLo]+y,a
+  mov y,#channel.target_volume
+  mov [CurrentChDataLo]+y,a
+
+  ;get sample adsr config
+  mov y,#SPCMOD.INSTRUMENT.ADSR
+  mov a,[TempBuffer1]+y
+  mov y,#channel.adsr
+  mov [CurrentChDataLo]+y,a
+
+  mov y,#SPCMOD.INSTRUMENT.ADSR+1
+  mov a,[TempBuffer1]+y
+  mov y,#channel.adsr+1
+  mov [CurrentChDataLo]+y,a
+
+
+GetDataFromPatternInstrumentIsVoid:
+	mov	y,#channel.note
+	mov	a,[CurrentChDataLo]+y
+	cmp	a,#$ff					;a non-present note is indicated by $ff
+	beq	GetDataFromPatternPeriodIsVoid
+
+	mov	y,#channel.effect					;check if effect command is $ff
+	mov	a,[CurrentChDataLo]+y
+	cmp	a,#$ff
+	beq	GetDataFromPatternCalculateNewPeriod	;if it is, directly calculate new period (why?)
+
+	and	a,#$0f					;merge effect command and data to test for finetune command
+	mov	TempBuffer1,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$f0
+	or	 a,TempBuffer1
+	xcn	a
+
+	cmp	a,#$e5			;finetune
+	beq	FinetuneStep
+
+	mov	y,#channel.effect
+	mov	a,[CurrentChDataLo]+y			;get current effect
+	and	a,#$0f
+	cmp	a,#$03					;check if effect is tone portamento
+	beq	GetDataFromPatternPortamento
+
+	cmp	a,#$05					;check if effect is tone portamento and volslide
+	beq	GetDataFromPatternPortamento
+	bra	GetDataFromPatternCalculateNewPeriod
+
+FinetuneStep:
+	call	!Finetune
+	bra	GetDataFromPatternCalculateNewPeriod
+
+GetDataFromPatternPortamento:
+	call	!TonePortamento
+	
+	jmp	!GetDataFromPatternCheckEffects
+
+
+GetDataFromPatternPeriodIsVoid:
+	;must retrigger note here if new sample
+	jmp !retriggerInstrument
+
+GetDataFromPatternCalculateNewPeriod:
+	mov	y,#channel.note
+	mov	a,[CurrentChDataLo]+y
+	mov	y,#channel.arpeggio_note_buffer
+	mov	[CurrentChDataLo]+y,a
+	mov	y,a				;put period in y
+	push	y
+	mov	y,#channel.finetune				
+	mov	a,[CurrentChDataLo]+y		;calculate finetune
+	mov	y,#AMIGA_PERIOD_SUBTABLE_LENGTH
+	mul	ya
+	addw	ya,PeriodTablePointerLo
+	movw	CurrentPeriodPointer,ya
+	
+	pop	y					;get corresponding value in 14bit period table
+	mov	a,[CurrentPeriodPointer]+y				;get current period
+	mov	TempBuffer1,a
+	mov	PeriodBufferLo,a
+	inc	y
+	mov	a,[CurrentPeriodPointer]+y
+	mov	TempBuffer2,a
+	mov	PeriodBufferHi,a
+
+;fetch pitch from pitch table. input: period	
+	mov	y,TempBuffer2		
+	mov	a,TempBuffer1
+	addw	ya,TempBuffer1		;multiply by 2
+	addw	ya,PitchTablePointerLo	;add table offset	
+	movw	TempBuffer1,ya				;move adress to pointer
+	mov	y,#0
+
+	mov	a,[TempBuffer1]+y				;get lo pitch byte	
+	mov	PitchBufferLo,a			;save new pitch
+	inc	y
+	mov	a,[TempBuffer1]+y
+	mov	PitchBufferHi,a
+;fetch pitch end	
+	
+	mov	y,#channel.current_pitch_lo			;save new pitch to array
+	mov	a,PitchBufferLo
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,PitchBufferHi
+	mov	[CurrentChDataLo]+y,a
+	
+	mov	y,#channel.amiga_period_lo			;save new period to array
+	mov	a,PeriodBufferLo
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,PeriodBufferHi
+	mov	[CurrentChDataLo]+y,a
+
+;maybe jump here if instrument change without note change?
+;@todo: do we need a special case if pitch not set yet?
+retriggerInstrument:
+	mov	y,#channel.vibrato_tremolo_waveform			;check vibrato waveform
+	mov	a,[CurrentChDataLo]+y
+	cmp	a,#$04
+	bne	VibratoRetrigger
+
+	mov	y,#channel.vibrato_position			;reset vibrato position
+	mov	a,#$00
+	mov	[CurrentChDataLo]+y,a
+
+VibratoRetrigger:
+	mov	y,#channel.vibrato_tremolo_waveform
+	mov	a,[CurrentChDataLo]+y
+	cmp	a,#$40
+	bne	VibratoNoWaveformReset
+
+	mov	y,#channel.tremolo_position
+	mov	a,#$00
+	mov	[CurrentChDataLo]+y,a
+
+VibratoNoWaveformReset:
+	mov	a,CurrentChannel
+	or	 a,#$02
+	mov	x,a
+	mov	y,#channel.current_pitch_lo
+	mov	a,[CurrentChDataLo]+y
+	mov	SPC_DSPA,x			;set pitch height(hi), dsp reg $x2
+	mov	SPC_DSPD,a
+	inc	y
+	inc	x
+	mov	a,[CurrentChDataLo]+y
+	
+	mov	SPC_DSPA,x			;set pitch height(lo), dsp reg $x3
+	mov	SPC_DSPD,a
+	inc	x
+	
+	mov	y,#channel.instrument			;set source sample number
+	mov	a,[CurrentChDataLo]+y
+	;if instrument empty, don't set
+	beq	+	
+		mov	SPC_DSPA,x
+		mov	SPC_DSPD,a
+
++
+	;dont retrigger, just change sample  if no new note present
+	mov	y,#channel.note
+	mov	a,[CurrentChDataLo]+y
+	cmp	a,#$ff					;a non-present note is indicated by $ff
+	beq	DontUpdateSourceSampleNumber
+		inc	x
+
+		mov	y,#channel.adsr			;set source sample number
+		mov	a,[CurrentChDataLo]+y
+
+		mov	SPC_DSPA,x			;use sample adsr settings
+		mov	SPC_DSPD,a
+		inc	x
+
+		inc y
+		mov	a,[CurrentChDataLo]+y
+
+		mov	SPC_DSPA,x
+		mov	SPC_DSPD,a
+		inc	x
+		inc	x
+
+		mov	y,#channel.current_channelmask
+		mov	a,[CurrentChDataLo]+y			;trigger note
+		or	 a,KeyOn			;set note in key on var
+		mov	KeyOn,a
+
+DontUpdateSourceSampleNumber:
+	jmp	!GetDataFromPatternCheckEffects
+
+GetPitchFromBufferAndSet:
+	mov	a,CurrentChannel
+	or	 a,#$02
+	mov	x,a
+	mov	y,#channel.current_pitch_lo
+	mov	a,[CurrentChDataLo]+y
+	mov	SPC_DSPA,x
+	mov	SPC_DSPD,a
+	inc	x
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	SPC_DSPA,x
+	mov	SPC_DSPD,a
+	ret
+
+
+CheckForTickBasedEffects:
+  ;check if note cutoff is due
+
+	mov	y,#channel.effect
+	mov	a,[CurrentChDataLo]+y
+	cmp	a,#$ff
+	beq	GetPitchFromBufferAndSet
+;check for special effects:
+	and	a,#$0f
+	asl	a
+	mov	x,a			;use effect command as pointer into jump table
+	jmp	[!TickBasedEffectJumpTable+x]
+	
+TickBasedEffectJumpTable:	
+	.dw TickBasedArpeggio
+	.dw TickBasedPortamentoUp
+	.dw TickBasedPortamentoDown
+	.dw TickBasedTonePortamento
+	.dw TickBasedVibrato
+	.dw TickBasedVolslidePorta
+	.dw VolslideVibrato
+	.dw TickBasedTremolo
+	.dw TickBasedVoid
+	.dw TickBasedVoid
+	.dw TickbasedVolslide
+	.dw TickBasedVoid
+	.dw TickBasedVoid
+	.dw TickBasedVoid
+	.dw TickBasedExEffects
+	.dw TickBasedVoid
+
+
+TickBasedVoid:
+	ret
+	
+TickBasedExEffects:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y		;get ex-effect subtype
+	and	a,#$f0
+	lsr a
+	lsr a
+	lsr a
+	mov	x,a			;use effect command as pointer into jump table
+	jmp	[!TickBasedExEffectJumpTable+x]
+
+TickBasedExEffectJumpTable:
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+	.dw TickBasedExEffectNoteRetrigger
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+	.dw TickBasedExEffectNoteCutOff
+	.dw TickBasedExEffectNoteDelay
+	.dw TickBasedExVoid
+	.dw TickBasedExVoid
+
+TickBasedExVoid:
+	ret
+
+;check for special effects commands
+GetDataFromPatternCheckEffects:
+	mov	y,#channel.effect
+	mov	a,[CurrentChDataLo]+y
+	cmp	a,#$ff			;no effect present?
+	beq	GetPitchFromBufferAndSetLong
+
+	and	a,#$0f
+
+	asl	a
+	mov	x,a			;use effect command as pointer into jump table
+	jmp	[!NormalEffectJumpTable+x]
+	
+NormalEffectJumpTable:
+	.dw GetPitchFromBufferAndSet
+	.dw GetPitchFromBufferAndSet
+	.dw GetPitchFromBufferAndSet
+	.dw GetPitchFromBufferAndSet
+	.dw GetPitchFromBufferAndSet
+	.dw GetPitchFromBufferAndSet
+	.dw GetPitchFromBufferAndSet
+	.dw GetPitchFromBufferAndSet
+	.dw SendStimulus				;fast hack to be able to transmit full byte to snes based on song data GetPitchFromBufferAndSet
+	.dw SetSampleOffset
+	.dw GetPitchFromBufferAndSet
+	.dw PositionJump
+	.dw EffectSetVolume
+	.dw PatternBreak
+	.dw GetDataFromPatternCheckExEffects
+	.dw SetSpeed0x0F
+
+GetPitchFromBufferAndSetLong:
+	jmp	!GetPitchFromBufferAndSet
+	
+;these are the special $Ex effects
+GetDataFromPatternCheckExEffects:
+
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$f0
+	mov	y,a			;save a
+	xcn	a
+	asl	a
+	mov	x,a			;pointer into jump table
+
+	jmp	[!ExEffectJumpTable+x]
+	
+ExEffectJumpTable:
+	.dw ExEffectSpecialReportCmd
+	.dw FinePortamentoUp
+	.dw FinePortamentoDown
+	.dw ExEffectVoid	
+	.dw SetVibratoWaveform
+	.dw Finetune
+	.dw PatternLoop
+	.dw ExEffectVoid
+	.dw ExEffectSetCoarsePanning
+	.dw EffectNoteRetrigger
+	.dw FineVolSlideUp
+	.dw FineVolSlideDown
+	.dw EffectNoteCutOff
+	.dw EffectNoteDelay
+	.dw ExEffectVoid
+	.dw ExEffectVoid
+	
+
+ExEffectVoid:
+	ret
+	
+
+TickBasedArpeggio:
+	mov	y,#channel.finetune				;calculate finetune
+	mov	a,[CurrentChDataLo]+y
+	mov	y,#AMIGA_PERIOD_SUBTABLE_LENGTH
+	mul	ya
+	addw	ya,PeriodTablePointerLo
+	movw	CurrentPeriodPointer,ya
+	
+	mov	y,#channel.current_pitch_lo
+	mov	a,[CurrentChDataLo]+y		;save current pitch to buffer
+	mov	PitchBufferLo,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	PitchBufferHi,a
+	jmp	!ArpeggioToneSelector
+
+TickBasedVolslidePorta:
+	call	!TonePortamentoContinue
+	jmp	!TickbasedVolslide
+VolslideVibrato:
+	call	!ContinueVibrato
+	jmp	!TickbasedVolslide
+
+
+
+
+ArpeggioToneSelector:
+	mov	a,WaitCounter		;get waitcounter
+	mov	y,#0			;clear y
+	mov	x,#3			;put 3 into x
+	div	ya,x			;divide waitcounter by three
+	
+	mov	TempBuffer1,y		;put remainder(can take values 0-2) into TempBuffer1
+	
+	cmp	TempBuffer1,#$01
+	beq	ArpeggioTone1
+
+	cmp	TempBuffer1,#$02
+	beq	ArpeggioTone2
+
+	cmp	TempBuffer1,#$00
+	beq	ArpeggioTone3
+		
+	ret
+
+ArpeggioTone1:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	xcn	a
+	and	a,#$0f
+	bra	ArpeggioCommit
+
+ArpeggioTone2:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	bra	ArpeggioCommit
+
+ArpeggioTone3:
+	mov	y,#channel.current_pitch_lo				;use current tone as pitch, unchanged
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer1,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a
+	bra	ArpeggioSetPitch
+
+ArpeggioCommit:
+	asl	a
+	mov	TempBuffer1,a
+	mov	y,#channel.arpeggio_note_buffer
+	mov	a,[CurrentChDataLo]+y
+	clrc
+	adc	a,TempBuffer1
+	mov	y,a
+
+	mov	a,[CurrentPeriodPointer]+y				;get current period
+	mov	TempBuffer3,a
+	inc	y
+	mov	a,[CurrentPeriodPointer]+y
+	mov	TempBuffer4,a
+	
+	mov	y,TempBuffer4		
+	mov	a,TempBuffer3
+	addw	ya,TempBuffer3		;multiply by 2
+	addw	ya,PitchTablePointerLo	;add table offset	
+	movw	TempBuffer3,ya				;move adress to pointer
+	mov	y,#0
+
+	mov	a,[TempBuffer3]+y				;get lo pitch byte	
+	mov	TempBuffer1,a			;save new pitch
+	inc	y
+	mov	a,[TempBuffer3]+y
+	mov	TempBuffer2,a
+
+
+ArpeggioSetPitch:
+	mov	a,CurrentChannel
+	or	 a,#$02
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,TempBuffer1
+	inc	a
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,TempBuffer2
+	ret
+
+FinePortamentoUp:
+	cmp	WaitCounter,#$00
+	bne	PortamentoExit				
+
+	mov	PortamentoSpeedMask,#$0f				;portamento up, but only with lower nibble of effect value
+
+TickBasedPortamentoUp:
+	mov	a, #(PORTAMENTO.PERIOD.MAX & $00ff)
+	mov	y, #(PORTAMENTO.PERIOD.MAX	>> 8)
+	movw	TempBuffer5,ya			;put highest slideable period into buffer
+	
+	mov	y,#channel.amiga_period_lo				;get current period
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer1,a			;and save it to temp buffer
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a
+
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y		;get current effect value
+	and	a,PortamentoSpeedMask		;and with mask depeding on normal or finetune portamento
+	mov	y,#$00				;inverse clear y
+	movw	TempBuffer3,ya			;put ya into tempbuffer3
+	movw	ya,TempBuffer1			;get current period
+	subw	ya,TempBuffer3			;substract portamento speed
+
+	cmpw	ya,TempBuffer5			;if negative, we've slided too high
+	bpl	PortaUpNoLimit
+
+	movw	ya,TempBuffer5		;use limit value if we've slided too high
+
+PortaUpNoLimit:	
+	movw	TempBuffer1,ya		;put new pitch to buffer
+
+	mov	y,#channel.amiga_period_lo				;save back current period
+	mov	a,TempBuffer1
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,TempBuffer2
+	mov	[CurrentChDataLo]+y,a
+	
+	mov	y,TempBuffer2		;get current period	
+	mov	a,TempBuffer1
+	addw	ya,TempBuffer1		;multiply by 2
+	addw	ya,PitchTablePointerLo	;add table offset	
+	movw  TempBuffer3,ya				;move adress to pointer
+	mov	y,#0
+
+	mov	a,[TempBuffer3]+y				;get lo pitch byte	
+	mov	TempBuffer1,a			;save new pitch
+	inc	y
+	mov	a,[TempBuffer3]+y
+	mov	TempBuffer2,a	
+	
+	
+	mov	y,#channel.current_pitch_lo		;save new pitch to current pitch and update pitch register
+	mov	a,TempBuffer1
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,TempBuffer2
+	mov	[CurrentChDataLo]+y,a
+	mov	a,CurrentChannel
+	or	 a,#$02
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,TempBuffer1
+	inc	a
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,TempBuffer2
+
+PortamentoExit:
+	mov	PortamentoSpeedMask,#$ff
+	ret
+
+FinePortamentoDown:
+	cmp	WaitCounter,#$00
+	bne	PortamentoExit
+
+	mov	PortamentoSpeedMask,#$0f
+
+TickBasedPortamentoDown:
+
+	mov	a, #(PORTAMENTO.PERIOD.MIN & $00ff)
+	mov	y, #(PORTAMENTO.PERIOD.MIN	>> 8)
+	movw	TempBuffer5,ya			;put lowest slideable period into buffer
+	
+	mov	y,#channel.amiga_period_lo				;get current period
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer1,a			;and save it to temp buffer
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a
+
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y		;get current effect value
+	and	a,PortamentoSpeedMask		;and with mask depeding on normal or finetune portamento
+	mov	y,#$00				;inverse clear y
+	addw	ya,TempBuffer1			;add portamento speed
+
+	cmpw	ya,TempBuffer5			;if positive, we've slided too high
+	bmi	PortaDownNoLimit
+
+	movw	ya,TempBuffer5		;use limit value if we've slided too high
+
+PortaDownNoLimit:	
+	movw	TempBuffer1,ya		;put new pitch to buffer
+
+	mov	y,#channel.amiga_period_lo				;save back current period
+	mov	a,TempBuffer1
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,TempBuffer2
+	mov	[CurrentChDataLo]+y,a
+	
+	mov	y,TempBuffer2		;get current period	
+	mov	a,TempBuffer1
+	addw	ya,TempBuffer1		;multiply by 2
+	addw	ya,PitchTablePointerLo	;add table offset	
+	movw		TempBuffer3,ya				;move adress to pointer
+	mov	y,#0
+
+	mov	a,[TempBuffer3]+y				;get lo pitch byte	
+	mov	TempBuffer1,a			;save new pitch
+	inc	y
+	mov	a,[TempBuffer3]+y
+	mov	TempBuffer2,a
+		
+		
+	mov	y,#channel.current_pitch_lo
+	mov	a,TempBuffer1
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,TempBuffer2
+	mov	[CurrentChDataLo]+y,a
+	mov	a,CurrentChannel
+	or	 a,#$02
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,TempBuffer1
+	inc	a
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,TempBuffer2
+	ret
+
+TonePortamento:
+	mov	y,#channel.note							;get note
+	mov	a,[CurrentChDataLo]+y
+	mov	y,a				;put period in y
+	push	y
+	mov	y,#channel.finetune				
+	mov	a,[CurrentChDataLo]+y		;calculate finetune
+	mov	y,#AMIGA_PERIOD_SUBTABLE_LENGTH
+	mul	ya
+	addw	ya,PeriodTablePointerLo
+	movw	CurrentPeriodPointer,ya
+	
+	pop	y					;get corresponding value in 14bit period table
+	mov	a,[CurrentPeriodPointer]+y				;get current period
+	mov	PeriodBufferLo,a
+	inc	y
+	mov	a,[CurrentPeriodPointer]+y
+	mov	PeriodBufferHi,a
+
+	mov	y,#channel.current_amiga_period_lo							;this is our target period to slide to				
+	mov	a,PeriodBufferLo
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,PeriodBufferHi
+	mov	[CurrentChDataLo]+y,a
+
+	mov	y,#channel.amiga_period_lo							;get current actual period
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer1,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a	
+	
+	
+	mov	y,#channel.portamento_slide_dir
+	mov	a,#$00
+	mov	[CurrentChDataLo]+y,a
+	movw	ya,PeriodBufferLo
+	cmpw	ya,TempBuffer1
+	beq	TonePortamentoEqual					;check if already at target period
+
+	bmi	TonePortamentoExit					;if plus, the target period is higher(tone is lower) than the current period. slide value must be added in that case
+
+	mov	y,#channel.portamento_slide_dir							;invert sliding direction
+	mov	a,#$01
+	mov	[CurrentChDataLo]+y,a
+
+TonePortamentoExit:
+	ret
+
+TonePortamentoEqual:
+	mov	y,#channel.current_amiga_period_lo
+	mov	a,#$00
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	[CurrentChDataLo]+y,a
+	ret
+
+TickBasedTonePortamento:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y		;get effect data (tone portamento speed value)
+	beq	TonePortamentoContinue		;if zero, continue and dont alter period
+
+	mov	y,#channel.tone_portamento_speed				;save speed
+	mov	[CurrentChDataLo]+y,a
+	mov	y,#channel.effect_data				;clear effect data
+	mov	a,#$00
+	mov	[CurrentChDataLo]+y,a
+
+TonePortamentoContinue:
+	mov	y,#channel.current_amiga_period_lo				;get target period, put into tempbuffer1
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer1,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a
+	
+	
+	movw	ya,TempBuffer1			;exit if target period is zero (set before if target period has already been reached
+	beq	TonePortamentoExit
+	mov	y,#channel.tone_portamento_speed
+	mov	a,[CurrentChDataLo]+y		;get current speed value (tone portamento speed)
+	mov	y,#$00				;clear y
+	movw	TempBuffer3,ya			;put slide amount into tempbuffer3
+	
+	mov	y,#channel.portamento_slide_dir
+	mov	a,[CurrentChDataLo]+y
+	bne	TonePortaSlideDown		;check whether to slide up or down
+
+	mov	y,#channel.amiga_period_lo				;get current period, put into TempBuffer5
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer5,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer6,a
+	
+	movw	ya,TempBuffer5			;get current period
+	subw	ya,TempBuffer3			;substract slidespeed
+	cmpw	ya,TempBuffer1			;check for overflow
+	bpl	TonePortaSlideDone
+
+	mov	y,#channel.current_amiga_period_lo				;if overflow occured, clear tone porta target period
+	mov	a,#$00
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	[CurrentChDataLo]+y,a
+	movw	ya,TempBuffer1			;and load target period instead
+	bra	TonePortaSlideDone
+
+TonePortaSlideDown:
+	mov	y,#channel.amiga_period_lo				;get current period, put into TempBuffer5
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer5,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer6,a
+	
+	movw	ya,TempBuffer5			;get current period
+	addw	ya,TempBuffer3			;substract slidespeed
+	cmpw	ya,TempBuffer1			;check for overflow
+	bmi	TonePortaSlideDone
+
+	mov	y,#channel.current_amiga_period_lo				;if overflow occured, clear tone porta target period
+	mov	a,#$00
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	[CurrentChDataLo]+y,a
+	movw	ya,TempBuffer1			;and load target period instead
+
+TonePortaSlideDone:
+	movw	TempBuffer1,ya			;save newly calculated period to current period buffer
+
+	mov	y,#channel.amiga_period_lo				;save to current period buffer
+	mov	a,TempBuffer1
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,TempBuffer2
+	mov	[CurrentChDataLo]+y,a
+
+;fetch pitch from pitch table. input: period	
+	movw	ya,TempBuffer1		
+	addw	ya,TempBuffer1		;multiply by 2
+	addw	ya,PitchTablePointerLo	;add table offset	
+	movw	TempBuffer1,ya				;move adress to pointer
+	mov	y,#0
+
+	mov	a,[TempBuffer1]+y				;get lo pitch byte	
+	mov	TempBuffer5,a			;save new pitch
+	inc	y
+	mov	a,[TempBuffer1]+y
+	mov	TempBuffer6,a
+
+	mov	y,#channel.current_pitch_lo				;save to current pitch buffer
+	mov	a,TempBuffer5
+	mov	[CurrentChDataLo]+y,a
+	inc	y
+	mov	a,TempBuffer6
+	mov	[CurrentChDataLo]+y,a
+	mov	a,CurrentChannel
+	or	 a,#DSPV_PL
+	mov	SPC_DSPA,a				;write to dsp
+	mov	SPC_DSPD,TempBuffer5
+	inc	a
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,TempBuffer6
+	ret
+
+TickBasedVibrato:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y		;if speed & depth are zero, continue vibrato without updating em.
+	beq	ContinueVibrato
+
+	mov	TempBuffer1,a
+	mov	y,#channel.vibrato_command_buffer				;get vibrato speed & depth buffer
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a
+	and	TempBuffer1,#$0f
+	beq	VibratoSkipDepthUpdate		;dont update depth if its zero
+
+	and	TempBuffer2,#$f0			;update buffer
+	or	 TempBuffer2,TempBuffer1
+
+VibratoSkipDepthUpdate:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y		;get vibrato speed
+	mov	TempBuffer1,a
+	and	TempBuffer1,#$f0
+	beq	VibratoSkipSpeedUpdate		;dont upgrade speed if its zero
+
+	and	TempBuffer2,#$0f			;update buffer
+	or	 TempBuffer2,TempBuffer1
+
+VibratoSkipSpeedUpdate:
+	mov	y,#channel.vibrato_command_buffer
+	mov	a,TempBuffer2			;save back updated vibrato speed & depth
+	mov	[CurrentChDataLo]+y,a
+
+ContinueVibrato:
+	mov	y,#channel.vibrato_position
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a			;vibratoTemp. get current vibrato position, this is our pointer into the vibrato table
+	lsr	TempBuffer2
+	lsr	TempBuffer2
+	and	TempBuffer2,#$1f			;divide by 4 and limit
+	mov	y,#channel.vibrato_tremolo_waveform			
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$03				;select current waveform
+	mov	TempBuffer3,a 		;vibratoData
+	beq	VibratoSelectSine
+
+	asl	TempBuffer2			;multiply table pointer with 8
+	asl	TempBuffer2
+	asl	TempBuffer2
+	cmp	a,#$01
+	beq	VibratoSelectRampDown
+
+	mov	TempBuffer3,#$ff			;this is square vibrato
+	bra	VibratoSelectSet
+
+VibratoSelectRampDown:
+	mov	y,#channel.vibrato_position
+	mov	a,[CurrentChDataLo]+y		;get current vibrato position
+	bpl	VibratoSet
+
+	mov	TempBuffer3,#$ff
+	setc
+	sbc	TempBuffer3,TempBuffer2
+	;x-isnt a save to tempbuffer3 reqd here? or does sbc include move to TempBuffer3? yes.
+	bra	VibratoSelectSet
+
+VibratoSet:
+	mov	TempBuffer3,TempBuffer2
+	bra	VibratoSelectSet
+
+VibratoSelectSine:
+	mov	x,TempBuffer2
+	mov	a,!VibratoTable+x			;access vibrato table
+	mov	TempBuffer3,a
+
+VibratoSelectSet:
+	mov	y,#channel.vibrato_command_buffer					
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f				;get current vibrato depth		
+	mov	y,TempBuffer3
+	mul	ya				;multiply with selected vibrato position
+	movw	TempBuffer5,ya
+	mov	y,#$07
+
+;is this loop working correctly?
+VibratoDivLoop:
+	lsr	TempBuffer6			;divide by 128
+	ror	TempBuffer5
+	dbnz	y,VibratoDivLoop
+
+;is immediately setting pitch correct?	
+	mov	y,#channel.amiga_period_lo				;get current period
+	mov	a,[CurrentChDataLo]+y
+	mov	PitchBufferLo,a
+	inc	y
+	mov	a,[CurrentChDataLo]+y
+	mov	PitchBufferHi,a
+	mov	y,#channel.vibrato_position
+	mov	a,[CurrentChDataLo]+y		;get vibrato position
+	bmi	VibratoPosNegative
+
+
+	movw	ya,PitchBufferLo
+	subw	ya,TempBuffer5
+	bra	VibratoUpdatePitch
+
+VibratoPosNegative:
+	movw	ya,PitchBufferLo
+	addw	ya,TempBuffer5
+
+VibratoUpdatePitch:
+	movw	PitchBufferLo,ya			;this is our new period
+	addw	ya,PitchBufferLo		;multiply by 2
+	addw	ya,PitchTablePointerLo		;add table offset	
+	movw	TempBuffer3,ya			;move adress to pointer
+	mov	y,#0
+
+	mov	a,[TempBuffer3]+y				;get lo pitch byte	
+	mov	PitchBufferLo,a			;save new pitch
+	inc	y
+	mov	a,[TempBuffer3]+y
+	mov	PitchBufferHi,a
+
+	
+	mov	a,CurrentChannel			;write pitch to dsp
+	or	 a,#DSPV_PL
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,PitchBufferLo
+	inc	a
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,PitchBufferHi
+
+
+	mov	y,#channel.vibrato_command_buffer
+	mov	a,[CurrentChDataLo]+y
+	lsr	a
+	lsr	a
+	and	a,#$3c
+	mov	TempBuffer1,a
+	mov	y,#channel.vibrato_position
+	mov	a,[CurrentChDataLo]+y
+	clrc
+	adc	a,TempBuffer1
+	mov	[CurrentChDataLo]+y,a
+	ret
+
+TickBasedTremolo:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	beq	TremoloContinue
+
+	mov	TempBuffer1,a
+	mov	y,#channel.tremolo_command_buffer
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a
+	and	TempBuffer1,#$0f
+	beq	TremoloNoNewSpeed
+
+	and	TempBuffer2,#$f0
+	or	 TempBuffer2,TempBuffer1
+
+TremoloNoNewSpeed:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer1,a
+	and	TempBuffer1,#$f0
+	beq	TremoloNoNewDepth
+
+	and	TempBuffer2,#$0f
+	or	 TempBuffer2,TempBuffer1
+
+TremoloNoNewDepth:
+	mov	y,#channel.tremolo_command_buffer
+	mov	a,TempBuffer2
+	mov	[CurrentChDataLo]+y,a
+
+TremoloContinue:
+	mov	y,#channel.tremolo_position
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer2,a
+	lsr	TempBuffer2
+	lsr	TempBuffer2
+	and	TempBuffer2,#$1f
+	mov	y,#channel.vibrato_tremolo_waveform
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer3,a
+	lsr	TempBuffer3
+	lsr	TempBuffer3
+	lsr	TempBuffer3
+	lsr	TempBuffer3
+	and	TempBuffer3,#$03
+	beq	TremolWavSel
+
+
+	asl	TempBuffer2
+	asl	TempBuffer2
+	asl	TempBuffer2
+	asl	TempBuffer2
+	cmp	TempBuffer3,#$01
+	beq	TremolWavSel2
+
+	mov	TempBuffer3,#$ff
+	bra	TremoloCommit
+
+TremolWavSel2:
+	mov	y,#channel.vibrato_position
+	mov	a,[CurrentChDataLo]+y
+	bpl	TremoloCommit2
+
+	mov	TempBuffer3,#$ff
+	setc
+	sbc	TempBuffer3,TempBuffer2
+	bra	TremoloCommit
+
+TremoloCommit2:
+	mov	TempBuffer3,TempBuffer2
+	bra	TremoloCommit
+
+TremolWavSel:
+	mov	x,TempBuffer2
+	mov	a,!VibratoTable+x			;access table #2
+	mov	TempBuffer3,a
+
+TremoloCommit:
+	mov	y,#channel.tremolo_command_buffer
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	mov	y,TempBuffer3
+	mul	ya
+	movw	TempBuffer5,ya
+	mov	y,#$06
+
+TremolDivLoop:
+	lsr	TempBuffer6
+	ror	TempBuffer5
+	dbnz	y,TremolDivLoop
+	
+	mov	y,#channel.current_volume
+	mov	a,[CurrentChDataLo]+y
+	mov	TempBuffer1,a
+	mov	y,#channel.tremolo_position
+	mov	a,[CurrentChDataLo]+y
+	bmi	TremolPosNeg
+
+	clrc
+	adc	TempBuffer1,TempBuffer5
+	bra	TremolPosPos
+
+TremolPosNeg:
+	setc
+	sbc	TempBuffer1,TempBuffer5
+
+TremolPosPos:
+	bpl	TremolPosRes
+
+	mov	TempBuffer1,#$00
+
+TremolPosRes:
+	cmp	TempBuffer1,#$40
+	bmi	TremolPosRes2
+
+	mov	TempBuffer1,#$40
+
+TremolPosRes2:
+	mov	a,CurrentChannel
+	or	 a,#DSPV_VOLL
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,TempBuffer1
+	inc	a
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,TempBuffer1
+	mov	y,#channel.tremolo_command_buffer
+	mov	a,[CurrentChDataLo]+y
+	lsr	a
+	lsr	a
+	and	a,#$3c
+	mov	TempBuffer1,a
+	mov	y,#channel.tremolo_position
+	mov	a,[CurrentChDataLo]+y
+	clrc
+	adc	a,TempBuffer1
+	mov	[CurrentChDataLo]+y,a
+	ret
+
+TickbasedVolslide:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	xcn	a
+	and	a,#$0f
+	beq	TickbasedVolSlideDown
+
+	mov	TempBuffer1,a
+
+VolSlideUp:
+	mov	y,#channel.current_volume
+	mov	a,[CurrentChDataLo]+y
+	adc	a,TempBuffer1
+	cmp	a,#$40
+	bmi	VolSlideUpNoWaveformReset
+
+	mov	a,#$40
+
+VolSlideUpNoWaveformReset:
+	mov	[CurrentChDataLo]+y,a
+  mov y,#channel.target_volume
+  mov [CurrentChDataLo]+y,a
+
+	mov	CurrentVolume,a
+
+	call	!SetVolumeVibrato
+	ret
+
+TickbasedVolSlideDown:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	mov	TempBuffer1,a
+
+VolSlideDown:
+	mov	y,#channel.current_volume
+	mov	a,[CurrentChDataLo]+y
+	sbc	a,TempBuffer1
+	bpl	VolSlideDownNoReset
+
+	mov	a,#$00
+
+VolSlideDownNoReset:
+	mov	[CurrentChDataLo]+y,a
+  mov y,#channel.target_volume
+  mov [CurrentChDataLo]+y,a
+
+	mov	CurrentVolume,a
+	call	!SetVolumeVibrato
+	
+	ret
+
+SetSpeed0x0F:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+Command0x0F:
+  bne +
+    ;F00 means: stop song completely
+    jmp !StopSong
+
++  
+	cmp a, #$1f
+	bcs SetTempo0x0F
+
+	mov	PatternSpeed,a			;self-modifying code
+	ret
+
+SetTempo0x0F:
+/*
+	default 125
+	PAL_AMIGA_VBL_RATE: 50
+	audio.tempoTimerVal / (bpm * PAL_AMIGA_VBL_RATE)
+	default spc $a0/160
+	8000/160*2,5 = 125
+	20000/125=160
+	spc timers: ~8000Hz
+
+  The correct formular aparently:
+  8000÷(125×0,4) = 160 ($a0)
+*/
+
+  mov Timer0Target,#0
+  
+  ;multiply by 0.4:
+  mov y, #2
+-  
+    asl a
+    rol Timer0Target
+    dbnz y, -
+
+  mov y,Timer0Target
+  mov x,#10
+  div ya,x
+  mov Timer0Target,a
+
+  ;divide 8000/result of above
+  ;because result is just 8 bits, we divide by 8000/$10 to get upper byte
+  mov x, a
+  mov y, #$01
+  mov a, #$f4
+  div ya, x
+
+  mov Timer0Target+1,#0
+  mov y, #4
+-  
+    asl a
+    rol Timer0Target+1
+    dbnz y, -
+
+  ;get lower byte of result
+  mov x, Timer0Target
+  mov y, #$1f
+  mov a, #$40
+  div ya, x
+	mov	Timer0Target,a
+
+  mov SPC_CONTROL,#$02      ;stop timer0
+  nop
+  nop
+  mov SPC_TIMER0,Timer0Target      ;set timer 0
+  nop
+  nop
+  mov SPC_CONTROL,#$03      ;start timer(s)
+	ret
+
+SetSampleOffset:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	mov	x,a
+	mov	a,#0
+	mov	y,#0
+	mov	TempBuffer3,#$90			;512/16*9=288, $120
+	mov	TempBuffer4,#$00
+
+SetSampleOffsetCalcLoop:	
+	cmp	x,#0
+	beq SetSampleOffsetCalcLoopDone
+
+	addw	ya,TempBuffer3
+	dec	x
+	bra SetSampleOffsetCalcLoop
+
+SetSampleOffsetCalcLoopDone:
+	movw	TempBuffer1,ya
+			
+	mov	y,#channel.instrument
+	mov	a,[CurrentChDataLo]+y
+	asl	a
+	asl	a
+	mov	x,a
+	mov	a,!SAMPLE.SOURCE.START+x			;create a new sample (#3f) that plays with the modified start position
+	mov	TempBuffer5,a
+	mov	!(SAMPLE.SOURCE.START+(SAMPLE.ProTracker.effect*SAMPLE.POINTER.SIZE)),a
+	mov	a,!(SAMPLE.SOURCE.START+1)+x
+	mov	TempBuffer6,a
+	mov	!(SAMPLE.SOURCE.START+1+(SAMPLE.ProTracker.effect*SAMPLE.POINTER.SIZE)),a
+	mov	a,!(SAMPLE.SOURCE.START+2)+x
+	mov	!(SAMPLE.SOURCE.START+2+(SAMPLE.ProTracker.effect*SAMPLE.POINTER.SIZE)),a
+	mov	a,!(SAMPLE.SOURCE.START+3)+x
+	mov	!(SAMPLE.SOURCE.START+3+(SAMPLE.ProTracker.effect*SAMPLE.POINTER.SIZE)),a
+	movw	ya,TempBuffer5
+	addw	ya,TempBuffer1
+	movw	TempBuffer5,ya
+	mov	a,TempBuffer5
+	mov	!(SAMPLE.SOURCE.START+(SAMPLE.ProTracker.effect*SAMPLE.POINTER.SIZE)),a
+	mov	a,TempBuffer6
+	mov	!(SAMPLE.SOURCE.START+1+(SAMPLE.ProTracker.effect*SAMPLE.POINTER.SIZE)),a
+	mov	a,CurrentChannel
+	or	 a,#DSPV_SRCN
+	mov	SPC_DSPA,a
+	mov	SPC_DSPD,#SAMPLE.ProTracker.effect
+	ret
+
+/*
+PositionJump:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+
+  call !setPosition
+
+	pop	a							;need to purge the stack a bit first
+	pop	a							;else, it would overflow slowly when using the pattern break command constantly
+	pop	a
+	pop	a
+	pop	a
+	pop	a
+	pop	a
+	pop	a
+
+	jmp	!MainLoop
+*/
+
+PositionJump:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	inc a
+	mov	PositionJumpTarget,a
+	ret
+
+setPosition:
+  mov CurrentPatternNumber,a
+  mov x,a
+  mov a,!(ModFile+SPCMOD.SEQUENCE)+x
+  asl a
+  mov x,a
+  mov a,!(ModFile+SPCMOD.PATTERN_POINTER)+x
+  mov y,a
+  mov a,!(ModFile+SPCMOD.PATTERN_POINTER+1)+x
+  addw  ya,InitPatternPointerLo
+  movw  CurrentPatternPointerLo,ya
+  ret
+
+;set channel volume:
+EffectSetVolume:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+
+  mov y,#channel.target_volume
+  mov [CurrentChDataLo]+y,a
+
+;effect 0xCx: fade volume very fast to avoid pops/clicks
+UpdateTargetVolumeTickBased:
+  mov y,#channel.target_volume
+  mov a,[CurrentChDataLo]+y
+  setc
+  mov y,#channel.current_volume
+  sbc a,[CurrentChDataLo]+y
+  beq +
+    ;divide by two with sign
+    cmp a, #$80
+    ror a
+    bne ++
+      ;fade difference too small, set volume directly
+      mov y,#channel.target_volume
+      mov a,[CurrentChDataLo]+y
+      bra +++
+
+++    
+    clrc
+    mov y,#channel.current_volume
+    adc a,[CurrentChDataLo]+y
+
++++    
+    mov y,#channel.current_volume
+    mov [CurrentChDataLo]+y,a
+    call  !SetVolume
+
++
+  ret
+
+
+PatternBreak:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y					;get break row.
+	bne	PatternBreakZero						;only breaks to row #0 of next pattern are supported. else dont do anything
+		mov	PatternBreakFlag,#1					;set break flag. the actual break gets executed after the current row has been completely processed
+
+PatternBreakZero:
+	ret
+
+SendStimulus:
+ExEffectSpecialReportCmd:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y	;get effect value
+	inc SpecialReportCmd
+	ret
+	
+SetVibratoWaveform:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	mov	TempBuffer1,a
+	mov	y,#channel.vibrato_tremolo_waveform							;update vibrato waveform
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$f0
+	or	 a,TempBuffer1
+	mov	[CurrentChDataLo]+y,a
+	ret
+
+Finetune:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	mov	y,#channel.finetune						;whats written to chdata $04 here?
+	mov	[CurrentChDataLo]+y,a
+	ret
+
+FineVolSlideUp:
+	mov	a,WaitCounter
+	bne	FineVolSlideUpCancel
+
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	mov	TempBuffer1,a
+	jmp	!VolSlideUp
+
+FineVolSlideUpCancel:
+	ret
+
+FineVolSlideDown:
+	mov	a,WaitCounter
+	bne	FineVolSlideDownCancel
+
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	mov	TempBuffer1,a
+	jmp	!VolSlideDown
+
+FineVolSlideDownCancel:
+	ret
+
+InitVariables:
+  mov WaitCounter,#$00
+  mov a,#$06
+  mov PatternSpeed,a		;self-modifying code
+  mov LoopCounter,#0
+  mov CurrentPatternNumber,#$00
+  mov PortamentoSpeedMask,#$ff
+  mov a,!(ModFile+SPCMOD.SONG_LENGTH)			;$13d3
+  mov NumberOfPatterns,a
+  mov a,!(ModFile+SPCMOD.CHANNEL_COUNT)
+  asl a
+  asl a
+  asl a
+  asl a
+  mov ChannelCount,a
+
+  ;enable as many channels as current modfile has
+  mov x,!(ModFile+SPCMOD.CHANNEL_COUNT)
+  mov a,!ChannelEnableMaskLUT+x
+  mov SongChannelMask,a
+
+  mov TempBuffer1,#(SPCMOD.PATTERN_DATA & $ff)			;initial relative adress of pattern tables
+  mov TempBuffer2,#(SPCMOD.PATTERN_DATA >> 8)
+  movw ya,ModFilePointerLo
+  movw ModFilePointer2Lo,ya		
+  addw ya,TempBuffer1			
+  movw CurrentPatternPointerLo,ya
+  movw InitPatternPointerLo,ya
+  movw CurrentLoopPointerLo,ya
+  mov a,!(ModFile+SPCMOD.SEQUENCE)			;load initial pattern.
+  asl a
+  mov x,a
+  mov a,!(ModFile+SPCMOD.PATTERN_POINTER)+x			;get pointer to pattern
+  mov y,a
+  mov a,!(ModFile+SPCMOD.PATTERN_POINTER+1)+x
+  addw ya,InitPatternPointerLo
+  movw CurrentPatternPointerLo,ya
+
+  mov a,#(rawAmigaPeriods & $00ff)			;set pointer to amiga period table
+  mov PeriodTablePointerLo,a
+  mov a,#(rawAmigaPeriods >> 8)
+  mov PeriodTablePointerHi,a
+
+  mov a,#(PitchTable & $00ff)			;set pointer to snes pitch table
+  mov PitchTablePointerLo,a
+  mov a,#(PitchTable >> 8)
+  mov PitchTablePointerHi,a
+  mov PatternBreakFlag,#0
+  mov PositionJumpTarget,#0
+
+  ret
+
+PortamentoDownLimit:
+	.dw $01e3
+
+;set reset some dsp registers:
+SetupDspRegsAndTimers:
+	mov	SPC_CONTROL,#$00							  ;stop timers
+	mov	a,SPC_COUNTER0									;clear 4bit counters
+	mov	a,SPC_COUNTER1									;clear 4bit counters
+	mov	a,SPC_COUNTER2									;clear 4bit counters
+
+	mov a,#BPM.DEFAULT
+	call !Command0x0F
+
+  mov SPC_TIMER0,Timer0Target      ;set timer 0
+  mov SPC_TIMER1,#$10      ;2 milliSeconds on timer 1
+  nop
+  nop
+  mov SPC_CONTROL,#$03      ;start timer(s)
+
+	mov	a,#$00			;clear all dsp regs
+	mov	x,a
+
+DspRegClearLoop:
+	cmp	x,#DSP_FLG
+	bne	DspRegClearLoopEchoSkip
+
+	mov	SPC_DSPA,x			;disable echo
+	mov	SPC_DSPD,#$20
+	inc	x
+	
+DspRegClearLoopEchoSkip:	
+	mov	SPC_DSPA,x
+	mov	SPC_DSPD,a
+	inc	x
+	bpl	DspRegClearLoop
+
+	mov	SPC_DSPA,#DSP_DIR			;setup dsp regs
+	mov	SPC_DSPD,#(SAMPLE.SOURCE.START >> 8)			;this is the sample info loaction (dir)
+	mov	SPC_DSPA,#DSP_FLG
+	mov	SPC_DSPD,#$20
+	mov	SPC_DSPA,#DSP_MVOLL			;set master volume
+	mov	SPC_DSPD,MainVolL
+	mov	SPC_DSPA,#DSP_MVOLR
+	mov	SPC_DSPD,MainVolR
+	mov	SPC_DSPA,#DSP_NON
+	mov	SPC_DSPD,#$00
+	mov	SPC_DSPA,#DSP_ENDX
+	mov	SPC_DSPD,a
+
+  ;set filter:
+  ;filter settings copied from: https://sneslab.net/wiki/File:Chrono_Trigger_FIR_filter.png
+	mov	SPC_DSPA,#DSP_C0
+	mov	SPC_DSPD,#$0c
+	mov	SPC_DSPA,#DSP_C1
+	mov	SPC_DSPD,#$21
+	mov	SPC_DSPA,#DSP_C2
+	mov	SPC_DSPD,#$26
+	mov	SPC_DSPA,#DSP_C3
+	mov	SPC_DSPD,#$26
+	mov	SPC_DSPA,#DSP_C4
+	mov	SPC_DSPD,#$13
+	mov	SPC_DSPA,#DSP_C5
+	mov	SPC_DSPD,#$fe
+	mov	SPC_DSPA,#DSP_C6
+	mov	SPC_DSPD,#$f3
+	mov	SPC_DSPA,#DSP_C7
+	mov	SPC_DSPD,#$f9
+
+
+  ;setup adsr on channels 1-4:	
+  mov a,CurrentChannel
+  push a
+
+  mov CurrentChannel,#$00
+-   mov a,CurrentChannel
+    cmp a,ChannelCount
+    beq +
+
+    call !SetupAdsr
+
+    clrc
+    adc CurrentChannel,#$10
+    bra -
+
++ pop a
+
+  call !ConfigureEcho
+  ret
+
+
+SetupAdsr:
+	mov	a,#DSPV_ADSR1			          ;dsp reg $x5 (adsr1)
+	or	a,CurrentChannel			;or with channel number
+	mov	x,a
+	
+	mov	SPC_DSPA,x			;set adsr 1 (winter gold example: $dc) new value: $cb (slower attack an decay)
+	mov	SPC_DSPD,#$0e			;old #$0c
+	inc	x
+	mov	SPC_DSPA,x			;set adsr 2 (winter gold example: $2d) new value: $36 (longer release)
+	mov	SPC_DSPD,#$2d			;old #$2d
+	inc	x
+
+	mov	a,x
+	and	a,#$f0			;only get channel, not register
+	mov	x,a
+	mov	a,#$40
+	ret	
+
+
+SetupSamples:
+	mov	x,#$00
+	mov	y,#SPCMOD.INSTRUMENT_DATA
+
+SetupSamplesLoop:
+	inc	y
+	mov	a,[ModFilePointerLo]+y		;get sample relative adress low
+	dec	y
+	clrc
+	adc	a,ModFilePointerLo		;add modfile position
+	mov		!(SAMPLE.SOURCE.START+4)+x,a		;store in dsp sample area
+	mov	a,[ModFilePointerLo]+y		;get sample relative adress hi
+	adc	a,ModFilePointerHi		;add modfile position, with carry from previous add
+	mov	!(SAMPLE.SOURCE.START+5)+x,a		;store in dsp sample area
+	inc	y
+	inc	y
+	inc	y
+	inc	y
+  
+  ;repeat the same with loop adress:	
+	inc	y
+	mov	a,[ModFilePointerLo]+y		;get sample relative adress low
+	dec	y
+	clrc
+	adc	a,ModFilePointerLo		;add modfile position
+	mov		!(SAMPLE.SOURCE.START+6)+x,a		;store in dsp sample area
+	mov	a,[ModFilePointerLo]+y		;get sample relative adress hi
+	adc	a,ModFilePointerHi		;add modfile position, with carry from previous add
+	mov	!(SAMPLE.SOURCE.START+7)+x,a		;store in dsp sample area
+	inc	y
+	inc	y
+	inc	y
+	inc	y
+	inc	x
+	inc	x
+	inc	x
+	inc	x
+	cmp	x,#$7c
+	bne	SetupSamplesLoop
+	
+	ret
+	
+KeyOnKeyOff:
+	mov	y,#0
+	mov	a,#DSP_KOF
+	movw	SPC_DSPA,ya
+	mov	SPC_DSPA,#DSP_KON
+	mov	a,KeyOn
+	and	a,SongChannelMask
+	mov	SPC_DSPD,a
+	ret
+
+CutOffChannelGain:
+	mov	a,#DSPV_GAIN				;select GAIN dsp reg
+	or	a,CurrentChannel		;
+	mov	SPC_DSPA,a			;set gain	(winter gold example: $3d)
+	mov	SPC_DSPD,#%10011111		;decrease volume, 8mS	;old #%10111111
+	mov	y,#channel.current_volume
+	mov	a,#0						;clear volume
+	mov	[CurrentChDataLo]+y,a
+  mov y,#channel.target_volume
+  mov [CurrentChDataLo]+y,a
+	ret					;return
+
+SetVolumeVibrato:
+  mov a,CurrentVolume
+  bra +
+
+SetVolume:
+  mov y,#channel.current_volume
+  mov a,[CurrentChDataLo]+y
+
++
+  mov TempBuffer1,a
+
+  ;set adsr
+  mov a,#DSPV_ADSR1
+  or  a,CurrentChannel
+  mov SPC_DSPA,a
+  mov y,#channel.adsr
+  mov a,[CurrentChDataLo]+y
+  mov SPC_DSPD,a
+  inc y
+
+  ;set adsr
+  mov a,#DSPV_ADSR2
+  or  a,CurrentChannel
+  mov SPC_DSPA,a
+  mov a,[CurrentChDataLo]+y
+  mov SPC_DSPD,a
+
+  ;second byte doubles as gain config
+  mov a,#DSPV_GAIN
+  or  a,CurrentChannel
+  mov SPC_DSPA,a
+  mov a,[CurrentChDataLo]+y
+  mov SPC_DSPD,a
+
+  ;calculate channel panning left
+  mov a,CurrentChannel
+  mov y,#channel.panning
+  mov a,[CurrentChDataLo]+y
+  eor a,#$f
+  mov y,MusicVol
+  mul ya
+  mov x,#$f
+  div ya,x
+
+  ;calculate channel volume
+  mov y,TempBuffer1
+  mul ya
+  mov x,#$40
+  div ya,x
+
+  ;set channel volume left
+  mov SPC_DSPA,CurrentChannel
+  mov SPC_DSPD,a
+
+  ;calculate channel panning right
+  mov a,CurrentChannel
+  mov y,#channel.panning
+  mov a,[CurrentChDataLo]+y
+  mov y,MusicVol
+  mul ya
+  mov x,#$f
+  div ya,x
+
+  ;calculate channel volume
+  mov y,TempBuffer1
+  mul ya
+  mov x,#$40
+  div ya,x
+
+  ;set channel volume right
+  mov x,CurrentChannel
+  inc x
+  mov SPC_DSPA,x
+  mov SPC_DSPD,a
+
+  ret
+
+
+SetVolumeLoop:
+	cmp	CurrentVolume,TempVol						;check if bigger or smaller
+	beq	SetVolumeExit
+	bmi	SetVolumeDec							;branch if old value is bigger than new
+
+	inc	TempVol
+	mov	a,CurrentChannel					;check active channel
+	mov	y,TempVol
+	movw	SPC_DSPA,ya
+	inc	a
+	movw	SPC_DSPA,ya
+	
+	bra	SetVolumeLoop
+
+SetVolumeDec:
+	dec	TempVol	
+	mov	a,CurrentChannel					;check active channel
+	mov	y,TempVol
+	movw	SPC_DSPA,ya
+	inc	a
+	movw	SPC_DSPA,ya	
+	bra	SetVolumeLoop
+
+
+SetVolumeExit:
+	ret
+
+
+PreTestRow:
+  mov y,#$00
+  mov NextRowChFadeOuts,#$00
+
+  mov CurrentChannel,#$00
+-   mov a,CurrentChannel
+    cmp a,ChannelCount
+    beq +
+    call !PreTestChannel
+
+    clrc
+    adc CurrentChannel,#$10
+    bra -
+
++
+  ret
+
+
+	
+	
+PreTestChannel:
+  mov a,[CurrentPatternPointerLo]+y
+  cmp a,#$00
+  beq PreTestChannelIsEffectOnly
+  cmp a,#$ff			;compare if channel entry is $ff(skip)
+  beq PreTestChannelIsVoid
+
+  inc y				;check if a period is present
+  mov a,[CurrentPatternPointerLo]+y
+  cmp a,#$ff
+  beq PreTestChannelIsEffectOnly2
+
+  inc y
+  mov a,[CurrentPatternPointerLo]+y
+  cmp a,#3				;check if tone portamento (which doesnt actually play a new note, so the old one must not be muted)
+  beq PreTestChannelIsEffectOnly3
+
+  and a,#$0f
+  mov TempBuffer1,a
+  inc y
+  mov a,[CurrentPatternPointerLo]+y
+  dec y
+  and a,#$f0
+  or a,TempBuffer1
+  cmp a,#$de					;delay sample effect present? if yes, don't trigger sample
+  beq PreTestChannelIsEffectOnly3
+
+  mov a,CurrentChannel
+  lsr a
+  lsr a
+  lsr a
+  lsr a
+  mov x,a
+  mov a,!ChannelBitflagLUT+x
+  or a,NextRowChFadeOuts
+  mov NextRowChFadeOuts,a
+
+  bra	PreTestChannelIsEffectOnly3
+
+PreTestChannelIsEffectOnly:	
+	inc	y				;if theres a note, the pattern data entry is 4 bytes long
+PreTestChannelIsEffectOnly2:
+	inc	y
+PreTestChannelIsEffectOnly3:	
+	inc	y
+
+PreTestChannelIsVoid:
+	inc	y
+	ret
+
+ExEffectSetCoarsePanning:
+  ;get effect value
+  mov y,#channel.effect_data
+  mov a,[CurrentChDataLo]+y   ;get current effect value
+  and a,#$0f
+
+  mov y,#channel.panning
+  mov [CurrentChDataLo]+y,a   ;write to buffer
+  ret
+
+PatternLoop:
+  ;get effect value
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y		;get current effect value
+	and	a,#$0f				;and $0f
+	bne	PatternLoopDontSetLoopPoint
+
+  ;effect value is 0, set loop point:
+	movw	ya,CurrentRowPointerLo	
+	movw	CurrentLoopPointerLo,ya
+	ret
+
+;effect value is not 0, check if we are in an active loop
+PatternLoopDontSetLoopPoint:
+	mov	a,LoopCounter			;check if loop is in progress, must be reset by loop jumper after loop repeat has been finished.
+	and	a,#$20
+	bne	PatternLoopDontSetLoopPointButLoop
+;we arent in a loop, set loop count:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y		;get current effect value
+	and	a,#$0f				;and $0f
+	or	a,#$30				;set "in loop"-flag and "do jump"-flag
+	mov	LoopCounter,a
+	ret
+
+PatternLoopDontSetLoopPointButLoop:
+;we are in a loop, just jump:
+	mov	a,LoopCounter
+	and	a,#$0f
+	dec	a
+	mov	LoopCounter,a
+	beq	PatternLoopFinished
+
+  ;do another loop jump
+	or	LoopCounter,#$30
+	
+PatternLoopFinished:
+	ret
+
+
+PatternLoopJumper:
+	mov	a,LoopCounter
+	and	a,#%00010000
+	beq	PatternLoopJumperNoJump
+
+	movw	ya,CurrentLoopPointerLo
+	movw	CurrentPatternPointerLo,ya
+	mov	a,LoopCounter		
+	and	a,#%11101111
+	mov	LoopCounter,a
+
+PatternLoopJumperNoJump:
+	ret
+
+EffectNoteRetrigger:
+EffectNoteDelay:
+EffectNoteCutOff:
+	mov	y,#channel.effect_data
+	mov	a,[CurrentChDataLo]+y		;get current effect value
+	and	a,#$0f				;and $0f
+	beq EffectNoteCutOffImmediately
+
+	dec a
+
+EffectNoteCutOffImmediately:
+	mov	y,#channel.tick_delay
+	mov	[CurrentChDataLo]+y,a		;write to buffer
+	ret
+
+TickBasedExEffectNoteCutOff:
+	mov	y,#channel.tick_delay	
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	bne	CheckForTickBasedEffectsNoteCutOffDec
+	
+	mov	[CurrentChDataLo]+y,a
+	call	!CutOffChannelGain
+	
+	mov	y,#channel.current_channelmask
+	mov	a,[CurrentChDataLo]+y			;disable channel in keyon reg
+	eor	a,#$ff
+	mov	TempBuffer1,a
+	and	KeyOn,TempBuffer1
+
+	mov	CurrentVolume,#$00
+	call	!SetVolume
+
+	mov	y,#channel.effect_data					;clear effect data so this routine isnt triggered on successive ticks of this frame
+	mov	a,#0
+	mov	[CurrentChDataLo]+y,a
+	
+	ret
+
+
+CheckForTickBasedEffectsNoteCutOffDec:
+	dec a
+	mov	[CurrentChDataLo]+y,a
+	ret	
+
+TickBasedExEffectNoteRetrigger:
+TickBasedExEffectNoteDelay:
+	mov	y,#channel.tick_delay
+	mov	a,[CurrentChDataLo]+y
+	and	a,#$0f
+	bne	CheckForTickBasedEffectsNoteDelayDec
+	
+	call	!SetNewSample
+
+	mov	y,#channel.current_channelmask
+	mov	a,[CurrentChDataLo]+y			;enable channel in keyon reg
+	or	a,TickSampleStart
+	mov	TickSampleStart,a
+
+	mov	y,#channel.effect_data					;clear effect data so this routine isnt triggered on successive ticks of this frame
+	mov	a,#0
+	mov	[CurrentChDataLo]+y,a
+	ret
+
+CheckForTickBasedEffectsNoteDelayDec:
+	dec a
+	mov	[CurrentChDataLo]+y,a
+	ret		
+
+ReceiveSongHandler:
+	mov	SPC_DSPA,#$0c
+	mov	SPC_DSPD,#$00
+	mov	SPC_DSPA,#$1c
+	mov	SPC_DSPD,#$00
+	mov	SPC_DSPA,#$2c
+	mov	SPC_DSPD,#$00
+	mov	SPC_DSPA,#$3c
+	mov	SPC_DSPD,#$00
+	mov	SPC_DSPA,#$6c			;disable echo
+	mov	SPC_DSPD,#$20			
+
+	
+	mov	a,#COMMAND.UploadSong			;set "upload song command received"-flag	so cpu knows we're ready
+	mov	SPC_PORT0,a
+	mov	a,#$00			;clear remaining ports
+	mov	SPC_PORT1,a
+	mov	SPC_PORT2,a
+	mov	SPC_PORT3,a	
+
+	mov	SpcDataPointerLo,#(ModFile & $00ff)		;setup mod pointer
+	mov	SpcDataPointerHi,#(ModFile >> 8)
+	mov	ModFilePointerLo,#(ModFile & $00ff)		;setup mod pointer
+	mov	ModFilePointerHi,#(ModFile >> 8)
+
+	mov	y,#$00				;clear mod pointer counter(actually, this counter always stays 0,just needed for indirect write)
+
+ReceiveSongWaitLoop2:				;wait for first transfer
+	cmp	SPC_PORT0,#COMMAND.UploadSongDone
+	beq	ReceiveSongComplete		;check if upload complete
+	
+	cmp	SPC_PORT0,#COMMAND.UploadSongT1			;check if data for transfer 1 is stable and on ports
+	bne	ReceiveSongWaitLoop2
+
+	mov	a,SPC_PORT1
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+	mov	a,SPC_PORT2
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+	mov	a,SPC_PORT3
+  mov [SpcDataPointerLo]+y,a
+  incw  SpcDataPointerLo        ;increment counter, word
+	mov	SPC_PORT0,#COMMAND.UploadSongT1
+
+	
+ReceiveSongWaitLoop3:				;wait for second transfer
+	cmp	SPC_PORT0,#COMMAND.UploadSongT2
+	bne	ReceiveSongWaitLoop3
+
+	mov	a,SPC_PORT1
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+	mov	a,SPC_PORT2
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+	mov	a,SPC_PORT3
+  mov [SpcDataPointerLo]+y,a
+  incw  SpcDataPointerLo        ;increment counter, word
+	mov	SPC_PORT0,#COMMAND.UploadSongT2
+
+	bra	ReceiveSongWaitLoop2
+
+ReceiveSongComplete:
+	mov	a,#$00			;clear apu ports so that cpu knows were ready
+	mov	SPC_PORT0,a
+	mov	SPC_PORT1,a
+	mov	SPC_PORT2,a
+	mov	SPC_PORT3,a
+
+  call !fullVolume
+
+	or SongEffectsUploaded,#%00000101			;set "song uploaded" flag, clear "sample pack uploaded" flag
+	ret
+
+fullVolume:
+  mov MainVolTargetL, #AUDIO.VOLUME.FULL                   ;get new volume
+  mov MainVolTargetR, #AUDIO.VOLUME.FULL                   ;get new volume
+  mov MainVolL, #AUDIO.VOLUME.FULL                   ;get new volume
+  mov MainVolR, #AUDIO.VOLUME.FULL                   ;get new volume
+
+  mov SPC_DSPA,#DSP_MVOLL
+  mov SPC_DSPD,MainVolL
+  mov SPC_DSPA,#DSP_MVOLR
+  mov SPC_DSPD,MainVolR
+  ret
+
+ReceiveSamplePack:
+	mov	a,#COMMAND.UploadSamplePack			;set "upload song command received"-flag	so cpu knows we're ready
+	mov	SPC_PORT0,a
+	mov	a,#$00			;clear remaining ports
+	mov	SPC_PORT1,a
+	mov	SPC_PORT2,a
+	mov	SPC_PORT3,a
+	
+	mov	SPC_DSPA,#DSP_KOF			;key off all channels
+	mov	SPC_DSPD,#%11111111
+	
+	movw	ya,SpcDataPointerLo		;save offset
+	movw	TempBuffer1,ya
+
+	mov	y,#$00				;clear mod pointer counter(actually, this counter always stays 0,just needed for indirect write)
+
+ReceiveSamplePackWaitLoop2:				;wait for first transfer
+	cmp	SPC_PORT0,#COMMAND.UploadSamplePackDone
+	beq	ReceiveSamplePackComplete		;check if upload complete
+	
+	cmp	SPC_PORT0,#COMMAND.UploadSongT1			;check if data for transfer 1 is stable and on ports
+	bne	ReceiveSamplePackWaitLoop2
+
+	mov	a,SPC_PORT1
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+	mov	a,SPC_PORT2
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+	mov	a,SPC_PORT3
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+
+	mov	SPC_PORT0,#COMMAND.UploadSongT1
+	
+ReceiveSamplePackWaitLoop3:				;wait for second transfer
+	cmp	SPC_PORT0,#COMMAND.UploadSongT2
+	bne	ReceiveSamplePackWaitLoop3
+
+	mov	a,SPC_PORT1
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+	mov	a,SPC_PORT2
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+	mov	a,SPC_PORT3
+	mov	[SpcDataPointerLo]+y,a
+	incw	SpcDataPointerLo				;increment counter, word
+
+	mov	SPC_PORT0,#COMMAND.UploadSongT2
+	bra	ReceiveSamplePackWaitLoop2
+
+ReceiveSamplePackComplete:
+	mov	a,#$00			;clear apu ports so that cpu knows were ready
+	mov	SPC_PORT0,a
+	mov	SPC_PORT1,a
+	mov	SPC_PORT2,a
+	mov	SPC_PORT3,a
+	movw	ya,TempBuffer1					;restore saved pointer
+	movw	SpcDataPointerLo,ya
+	
+	or	SongEffectsUploaded,#%00000010			;set "sample pack uploaded" flag
+	call	!SetupEffectSamples
+  ret
+
+
+SetupEffectSamples:
+	movw ya, SpcDataPointerLo
+	movw SpcDataPointerLo2, ya
+	mov	x,#$00				;start copying to 34th dsp sample
+	mov	y,#$00
+	mov	a,[SpcDataPointerLo]+y		;get number of sample in pack
+	and	a,#EFFECTSAMPLE.COUNT.MAX-1				;maximum number of samples 31
+	mov	TempBuffer1,a			;this is our number of samples to process
+
+SetupEffectSamplesLoop:
+	mov y,#1 ;advance to first byte pointer
+
+  ;sample adress:
+	mov	a,[SpcDataPointerLo]+y		;get sample relative adress low
+	inc	y
+	clrc
+	adc	a,SpcDataPointerLo2		;add modfile position
+	mov		!(SAMPLE.SOURCE.START+(SAMPLE.SoundEffects*SAMPLE.POINTER.SIZE)+0)+x,a		;store in dsp sample area
+	mov	a,[SpcDataPointerLo]+y		;get sample relative adress hi
+	adc	a,SpcDataPointerHi2		;add modfile position, with carry from previous add
+	dec	y
+	mov	!(SAMPLE.SOURCE.START+(SAMPLE.SoundEffects*SAMPLE.POINTER.SIZE)+1)+x,a		;store in dsp sample area
+	inc	y
+	inc	y
+  
+  ;sample loop adress:	
+	mov	a,[SpcDataPointerLo]+y		;get sample relative adress low
+	inc	y
+	clrc
+	adc	a,SpcDataPointerLo2		;add modfile position
+	mov		!(SAMPLE.SOURCE.START+(SAMPLE.SoundEffects*SAMPLE.POINTER.SIZE)+2)+x,a		;store in dsp sample area
+	
+	mov	a,[SpcDataPointerLo]+y		;get sample relative adress hi
+	adc	a,SpcDataPointerHi2		;add modfile position, with carry from previous add
+	dec	y
+	mov	!(SAMPLE.SOURCE.START+(SAMPLE.SoundEffects*SAMPLE.POINTER.SIZE)+3)+x,a		;store in dsp sample area
+
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	incw SpcDataPointerLo
+	
+	inc	x
+	inc	x
+	inc	x
+	inc	x
+	dbnz	TempBuffer1,SetupEffectSamplesLoop
+	
+	ret
+
+PlaySoundEffectAbort:
+  ret
+
+PlaySoundEffect:
+  mov SpcDataPointerLo,#(SOUNDEFFECT.SAMPLES.START & $00ff)
+  mov SpcDataPointerHi,#(SOUNDEFFECT.SAMPLES.START >> 8)
+
+	movw	ya,SPC_PORT0				;save all 4 ports to variables
+	movw	TempBuffer1,ya			;tempbuffer1:command,tb2:se number,tb3 upper nibble:pitch,tb3 lower nibble:panning/,4:counter (was:volume)
+	movw	ya,SPC_PORT2
+	movw	TempBuffer3,ya
+
+	bbc	$ef.1,PlaySoundEffectAbort		;only process sound effect if song has been uploaded before
+
+	;only play sfx if input counter differs from last (prevent erroneously retriggering sfx)
+	mov a, TempBuffer4
+	cmp a, SoundEffectCounter
+	beq PlaySoundEffectAbort
+
+	mov SoundEffectCounter, a
+
+	mov	y,#0
+	mov	a,[SpcDataPointerLo]+y		;get number of samples in pack
+	mov	TempBuffer5,a
+	mov	a,TempBuffer2
+	
+	cmp	a,TempBuffer5
+	bcs	PlaySoundEffectAbort		;return if sound effect to play is bigger than number of samples in pack
+
+	mov	a,ActiveSoundEffectCh
+	inc	a				;goto next channel
+	and	a,#1				;maximum number of channels is 3
+	mov	ActiveSoundEffectCh,a		;save back
+	mov	x,a
+	mov	a,!SoundEffectChannelDspRegLUT+x	;get channel value for dsp access
+	mov	TempBuffer5,a
+
+	mov	a,!SoundEffectChannelKofLUT+x	;get channel key off bit
+	mov	TempBuffer6,a
+/*
+	mov	SPC_DSPA,#DSP_KOF				;key off current channel
+	mov	SPC_DSPD,a
+	
+  ;wait 8ms for key off to finish
+	mov	a,SPC_COUNTER1	;clear 4bit counter
+	mov	y,#4
+KofWaitLoop2:
+	mov	a,SPC_COUNTER1				;wait for 2mS
+	beq	KofWaitLoop2
+	dbnz	y,KofWaitLoop2
+*/
+	mov	x,TempBuffer5			;get pointer to dsp channel register set
+	
+	;multiply sample number by 16 to get sfx 
+	mov y,#$10
+	mov	a,TempBuffer2
+	mul ya
+	addw ya,SpcDataPointerLo
+	movw SpcDataPointerLo,ya
+	incw SpcDataPointerLo ;increment because first byte in sample pack is number of samples
+
+	mov y,#$00	
+	inc	y
+	inc	y
+	inc	y
+	inc	y
+
+  mov a, [SpcDataPointerLo]+y    ;get volume l
+  mov TempBuffer7, a
+  mov a, TempBuffer3
+  call  !SoundEffectCalcPan
+
+  mov SPC_DSPA,x
+  mov SPC_DSPD,a
+  inc y
+  inc x
+
+  mov a, [SpcDataPointerLo]+y    ;get volume r
+  mov TempBuffer7, a
+  mov a, TempBuffer3
+  eor a, #$f
+  call  !SoundEffectCalcPan
+
+  mov SPC_DSPA,x
+  mov SPC_DSPD,a
+  inc y
+  inc x
+
+;**************************************************
+  mov a, [SpcDataPointerLo]+y    ;get pitch lo
+  mov PitchBufferLo,a     ;save new pitch
+  inc y
+  mov a, [SpcDataPointerLo]+y    ;get pitch hi
+  mov PitchBufferHi,a     ;save new pitch
+  
+  mov a, TempBuffer3 ;expand pitch mod to 8bit
+  and a, #$f0
+  mov TempBuffer3, a
+  lsr a
+  lsr a
+  lsr a
+  lsr a
+  or  a, TempBuffer3
+
+
+  push  y
+  mov y, #$0          ;add to default pitch
+  
+  clrc                ;rebase to +-127
+  mov   TempBuffer3, #$7f
+  mov   TempBuffer4, #$ff
+  addw  ya, TempBuffer3
+  addw  ya, PitchBufferLo
+  movw  PitchBufferLo, ya
+  pop y
+
+  mov SPC_DSPA, x          ;write to regs
+  mov SPC_DSPD, PitchBufferLo
+  inc x
+  
+  mov SPC_DSPA, x
+  mov SPC_DSPD, PitchBufferHi
+
+PlaySoundEffectCustomPitch:
+  inc x
+
+	mov	a,TempBuffer2			;get sound effect to play
+	clrc
+	adc	a,#SAMPLE.SoundEffects				;add 34 (sound effects start at dsp sample 34)
+	
+	mov	SPC_DSPA,x
+	mov	SPC_DSPD,a
+
+	inc	y
+	inc	x
+	mov	a,[SpcDataPointerLo]+y		;get adsr lo
+	
+	mov	SPC_DSPA,x
+	mov	SPC_DSPD,a
+
+	inc	y
+	inc	x
+	mov	a,[SpcDataPointerLo]+y		;get adsr hi
+	
+	mov	SPC_DSPA,x
+	mov	SPC_DSPD,a
+
+	inc	y
+	inc	x
+	mov	a,[SpcDataPointerLo]+y		;get gain
+	
+	mov	SPC_DSPA,x
+	mov	SPC_DSPD,a
+
+	mov	SPC_DSPA,#DSP_KOF			;reset key off in case it's still active.(shouldn't, though)
+	mov	SPC_DSPD,#%00000000
+
+	mov	SPC_DSPA,#DSP_KON			;key on channel
+	mov	SPC_DSPD,TempBuffer6
+
+  ret
+
+; a, lower nibble: pan position
+;	TempBuffer7:total channel volume
+;out:	a,8bit: panned channel volume
+SoundEffectCalcPan:
+	lsr a
+  and	a,#%00000111			;mask off rest
+	push	x
+	asl	a
+	mov	x,a				;use as pointer
+	mov	a,TempBuffer7
+	jmp	[!PlaySoundEffectLVolLUT+x]
+
+PlaySoundEffectLVolLUT:
+	.dw PlaySoundEffectVolTBL
+	.dw PlaySoundEffectVolTBL+1
+	.dw PlaySoundEffectVolTBL+2
+	.dw PlaySoundEffectVolTBL+3
+	.dw PlaySoundEffectVolTBL+4
+	.dw PlaySoundEffectVolTBL+5
+	.dw PlaySoundEffectVolTBL+6
+	.dw PlaySoundEffectVolTBL+7
+			
+PlaySoundEffectVolTBL:
+	lsr	a
+	lsr	a
+	lsr	a
+	lsr	a
+	lsr	a
+	lsr	a
+	lsr	a
+	nop
+	mov	TempBuffer8,a			;save
+	mov	a,TempBuffer7
+	setc
+	sbc	a,TempBuffer8			;substract calculated pan value
+	pop	x
+ReceiveStream:
+	ret
+
+UpdateVolEchoVariablesOnly:
+	mov	SPC_DSPA,#DSP_MVOLL
+	mov	SPC_DSPD,MainVolL
+	mov	SPC_DSPA,#DSP_MVOLR
+	mov	SPC_DSPD,MainVolR
+	mov	SPC_DSPA,#DSP_EVOLL
+	mov	SPC_DSPD,EchoVolL
+	mov	SPC_DSPA,#DSP_EVOLR
+	mov	SPC_DSPD,EchoVolR
+	
+	ret
+
+;set key on/key off here:
+GetDataFromPatternCheckPatternPosition:
+  ;check if pattern break is due
+	mov	a, PatternBreakFlag					;check if pattern break flag is set
+	beq	CheckPatternBreakExit
+
+	inc	CurrentPatternNumber					;increment current pattern
+	mov	x,CurrentPatternNumber					;check if we overflow
+	cmp	x,NumberOfPatterns
+	bne	PatternBreakNoOverflow
+
+	mov	CurrentPatternNumber,#$00					;reset to pattern #0 if overflow occured
+	mov	x,CurrentPatternNumber
+
+PatternBreakNoOverflow:
+	mov	a,!(ModFile+SPCMOD.SEQUENCE)+x					;get id number of next pattern
+	asl	a
+	mov	x,a
+	mov	a,!(ModFile+SPCMOD.PATTERN_POINTER)+x					;get word-pointer to that table
+	mov	y,a
+	mov	a,!(ModFile+SPCMOD.PATTERN_POINTER+1)+x
+	addw	ya,InitPatternPointerLo				
+	movw	CurrentPatternPointerLo,ya				;update current pattern pointer
+
+	mov	PatternBreakFlag,#0					;clear pattern break flag and exit
+	pop	a							;need to purge the stack a bit first
+	pop	a							;else, it would overflow slowly when using the pattern break command constantly
+	pop	a
+	pop	a
+	
+  	;is this really the correct amount? positionJump needed 2 more...
+	jmp	!MainLoop
+
+CheckPatternBreakExit:
+	mov a, PositionJumpTarget
+	beq +
+		mov PositionJumpTarget, #0
+		dec a
+		call !setPosition
+		pop	a							;need to purge the stack a bit first
+		pop	a							;else, it would overflow slowly when using the pattern break command constantly
+		pop	a
+		pop	a
+		
+		jmp	!MainLoop
+
+
++
+  	;check if at end of current pattern
+	mov	x,CurrentPatternNumber
+	mov	a,!(ModFile+SPCMOD.SEQUENCE)+x		;load pattern number
+	inc	a
+	asl	a			;multiply, use as pointer into patterntable pointertable list
+	mov	x,a
+	mov	a,!(ModFile+SPCMOD.PATTERN_POINTER)+x
+	mov	TempBuffer2,a
+	mov	a,!(ModFile+SPCMOD.PATTERN_POINTER+1)+x
+	mov	TempBuffer1,a
+	movw	ya,CurrentPatternPointerLo
+	subw	ya,InitPatternPointerLo
+	cmpw	ya,TempBuffer1
+	bpl	CheckPatternPositionPatternEnd
+
+	ret
+
+CheckPatternPositionPatternEnd:
+	inc	CurrentPatternNumber		;increment position in current pattern
+	mov	a,CurrentPatternNumber
+	cmp	a,NumberOfPatterns		;check if at end of pattern
+	beq	CheckPatternPositionReset
+
+	mov	x,a
+	mov	a,!(ModFile+SPCMOD.SEQUENCE)+x
+	asl	a
+	mov	x,a
+	mov	a,!(ModFile+SPCMOD.PATTERN_POINTER)+x
+	mov	y,a
+	mov	a,!(ModFile+SPCMOD.PATTERN_POINTER+1)+x
+	addw	ya,InitPatternPointerLo
+	movw	CurrentPatternPointerLo,ya
+	movw	CurrentLoopPointerLo,ya
+	ret
+
+CheckPatternPositionReset:				;wrap to pattern 0
+	mov	SPC_PORT2,#$50                   ;why would we write to port2 here? maybe an indicator that song looped??
+	mov	CurrentPatternNumber,#$00
+	mov	x,CurrentPatternNumber
+	mov	a,!(ModFile+SPCMOD.SEQUENCE)+x
+	asl	a
+	mov	x,a
+	mov	a,!(ModFile+SPCMOD.PATTERN_POINTER)+x
+	mov	y,a
+	mov	a,!(ModFile+SPCMOD.PATTERN_POINTER+1)+x
+	addw	ya,InitPatternPointerLo
+	movw	CurrentPatternPointerLo,ya
+	ret
+	
+
+ClearAllChannelArray:
+	mov	a,#(ChannelArray & $ff)		;get pointer to first channel array
+	mov	y,#(ChannelArray	>> 8)
+	movw	TempBuffer1,ya
+
+    movw	ChannelArrayPointer,ya
+    mov	a,#$01	
+    call	!ClearChannelArray
+
+    movw	ChannelArrayPointer+2,ya
+    mov	a,#$02
+    call	!ClearChannelArray
+
+    movw	ChannelArrayPointer+4,ya
+    mov	a,#$04
+    call	!ClearChannelArray
+
+    movw	ChannelArrayPointer+6,ya
+    mov	a,#$08
+    call	!ClearChannelArray
+
+    movw    ChannelArrayPointer+8,ya
+    mov a,#$10
+    call    !ClearChannelArray
+
+    movw    ChannelArrayPointer+10,ya
+    mov a,#$20
+    call    !ClearChannelArray
+
+/*
+    movw    ChannelArrayPointer+12,ya
+    mov a,#$40
+    call    !ClearChannelArray
+
+    movw    ChannelArrayPointer+14,ya
+    mov a,#$80
+    call    !ClearChannelArray
+*/
+	ret
+	
+	
+ClearChannelArray:
+	mov	y,#channel.current_channelmask	;number of bytes to copy
+	mov	[TempBuffer1]+y,a		;put channel mask into array pointer + channel mask value
+	decw	TempBuffer1
+  	push a
+
+	mov	a,#0
+ClearChannelArrayLoop:
+	mov	[TempBuffer1]+y,a		;clear array
+	dbnz	y,ClearChannelArrayLoop
+
+  incw  TempBuffer1
+
+  pop a
+  mov x,#-1
+-
+	inc x
+	ror a
+	bcc -
+
+  mov a,!ChannelPanningDefault+x
+
+  mov y,#channel.panning
+  mov [TempBuffer1]+y,a
+
+  mov a,#channel.current_channelmask+1  ;get amount of bytes per array and add to current adress
+  mov y,#0
+  addw  ya,TempBuffer1
+  movw  TempBuffer1,ya      ;save adress of next array
+	ret
+
+ChannelPanningDefault:
+  .db $4
+  .db $c
+  .db $c
+  .db $4
+  .db $4
+  .db $c
+  .db $c
+  .db $4
+
+CommandVoid:
+  ret
+
+SetSongChannelMask:
+  mov SongChannelMask,SPC_PORT1			;get new channel mask
+  mov SPC_DSPA,#DSP_KOF
+  mov a,SongChannelMask
+  eor a,#$3f					;invert, switch off masked channels immediately
+  mov SPC_DSPD,a					;key off 
+  mov SPC_PORT0,#COMMAND.SetSongChMask		;ack
+  ret
+
+
+SetSongSpeed:
+  mov	a,SPC_PORT1			;get new speed
+  call !Command0x0F
+  ret
+
+CommandSetPatternPosition:
+  mov a,SPC_PORT1     ;get target pattern position
+  call !setPosition
+
+  or  SongEffectsUploaded,#%00000100      ;unpause song
+  mov SPC_DSPA,#DSP_KOF        ;reset key off in case it's still active.(shouldn't, though)
+  mov SPC_DSPD,#%00111111        ;key off all mod/stream channels
+
+  mov a,CurrentPatternNumber
+  inc a
+  mov SPC_PORT1,a    ;ack pattern
+  mov SPC_PORT0,#COMMAND.SetPosition     ;ack command
+  ret
+
+CommandSetEchoVolume:
+  mov a,SPC_PORT1
+  mov x,SPC_PORT2
+  call !setEchoVolume
+  inc a
+  mov SPC_PORT1,a
+  mov SPC_PORT0,#COMMAND.SetEchoVolume     ;ack command
+  ret
+
+setEchoVolume:
+  mov EchoVolL, a
+  mov EchoVolR, x
+  mov SPC_DSPA,#DSP_EVOLL
+  mov SPC_DSPD,EchoVolL
+  mov SPC_DSPA,#DSP_EVOLR
+  mov SPC_DSPD,EchoVolR
+
+  ret
+
+
+StopSong:
+  and SongEffectsUploaded,#%11111011    ;clear "play" flag
+  mov SPC_DSPA,#DSP_KOF        ;reset key off in case it's still active.(shouldn't, though)
+  mov SPC_DSPD,#%00111111        ;key off all mod/stream channels
+  mov SPC_PORT0,#COMMAND.StopSong     ;ack command
+  ret
+
+StopSongStream:
+  call !StopSong
+  call !fullVolume
+  ret
+
+SetReportType:
+	mov	SpcReportType,SPC_PORT1			;get new report type
+	mov	SpcReportArg,SPC_PORT2		;get argument
+	mov	SPC_PORT0,#COMMAND.ReportType			;ack
+  ret
+
+SetMasterVolume:
+  mov a,SPC_PORT1
+  mov MainVolTargetL, a                    ;get new volume
+  mov a,SPC_PORT2
+  mov MainVolTargetR, a                    ;get new volume
+
+  ;only set volume immediately if corresponding flag is set:
+  bpl +
+    and MainVolTargetL, #$7f
+    and MainVolTargetR, #$7f
+    mov MainVolL, MainVolTargetL
+    mov MainVolR, MainVolTargetR
+    mov SPC_DSPA, #DSP_MVOLL
+    mov SPC_DSPD, MainVolL
+    mov SPC_DSPA, #DSP_MVOLR
+    mov SPC_DSPD, MainVolR
+
+    call !fadeEchoVolume
+
++
+  and MainVolTargetL, #$7f
+  and MainVolTargetR, #$7f
+
+  mov SPC_PORT0, #COMMAND.SetMasterVolume                    ;ack
+-
+    mov a,SPC_PORT0   ;wait for zero out
+    bne -
+
+  mov SPC_PORT0, #0                  ;ack
+  ret
+
+;make sure echo volume is never bigger than main volume
+fadeEchoVolume:
+  mov a, EchoVolL
+  mov x, MainVolL
+  call !adjustReferenceVolume
+  mov EchoVolL,a
+  mov SPC_DSPA,#DSP_EVOLL
+  mov SPC_DSPD,EchoVolL
+
+  mov a, EchoVolR
+  mov x, MainVolR
+  call !adjustReferenceVolume 
+  mov EchoVolR,a
+  mov SPC_DSPA,#DSP_EVOLR
+  mov SPC_DSPD,EchoVolR
+  ret
+
+abs:
+  cmp a,#$80
+  bcc +
+    eor a,#$ff
+    inc a
+
++
+  ret
+
+adjustReferenceVolume:
+  mov TempBuffer1,a
+  call !abs
+  mov TempBuffer3,a
+  mov TempBuffer2,x
+  mov a,x
+  call !abs
+  mov TempBuffer4,a
+  cmp TempBuffer3, TempBuffer4
+  beq +
+  bcc +
+    mov a,TempBuffer1
+    bmi ++
+      mov a,TempBuffer4
+      ret
+
+++
+    mov a,TempBuffer4
+    eor a,#$ff
+    inc a
+    ret
+
++
+  mov a, TempBuffer1
+  ret
+
+FadeMainVolume:
+  cmp MainVolTargetL, MainVolL
+  beq +
+  bcc ++
+    inc MainVolL
+    bra +++
+
+++
+    dec MainVolL
++++
+    mov SPC_DSPA, #DSP_MVOLL
+    mov SPC_DSPD, MainVolL
++
+  cmp MainVolTargetR, MainVolR
+  beq +
+  bcc ++
+    inc MainVolR
+    bra +++
+
+++
+    dec MainVolR
++++
+    mov SPC_DSPA, #DSP_MVOLR
+    mov SPC_DSPD, MainVolR
++
+  call !fadeEchoVolume
+  ret
+
+SendReportData:
+	mov	a,SpcReportType		;get report type
+	and	a,#$07	
+	asl 	a
+	mov	x,a			;pointer into jump table
+
+	jmp	[!ReportJumpTable+x]
+	
+ReportJumpTable:
+	.dw	ReportVoid
+	.dw	ReportVoid
+	.dw	ReportChannelLevels
+	.dw	ReportSpecialCmd
+	.dw	ReportVoid
+	.dw	ReportVoid
+	.dw	ReportVoid
+	.dw	ReportVoid
+	
+ReportVoid:
+	mov	a,#0
+	mov	SPC_PORT1,a			;clear report data
+	mov	SPC_PORT2,a			
+	mov	SPC_PORT3,a	
+	ret
+
+
+;report current sample levels of all 4 mod channels as 4bit nibbles unsigned.
+ReportChannelLevels:
+	mov	SPC_DSPA,#DSPV_OUTX0
+	mov	a,SPC_DSPD			;get current wave height ch0
+	lsr	a
+	lsr	a
+	lsr	a
+	and	a,#$0f
+	mov	TempBuffer1,a	
+
+	mov	SPC_DSPA,#DSPV_OUTX1
+	mov	a,SPC_DSPD			;get current wave height ch1
+	asl	a
+	and	a,#$f0
+	or	a,TempBuffer1
+	mov	TempBuffer1,a
+
+	mov	SPC_DSPA,#DSPV_OUTX2
+	mov	a,SPC_DSPD			;get current wave height ch2
+	lsr	a
+	lsr	a
+	lsr	a
+	and	a,#$0f
+	mov	TempBuffer1+1,a	
+
+	mov	SPC_DSPA,#DSPV_OUTX3
+	mov	a,SPC_DSPD			;get current wave height ch3
+	asl	a
+	and	a,#$f0
+	or	a,TempBuffer1+1
+	mov	TempBuffer1+1,a				
+	
+	movw	ya,TempBuffer1
+	
+	mov	SPC_PORT1,#0			;clear report byte first
+	movw	SPC_PORT2,ya			;write data to ports
+	mov	a,SpcReportType
+	or	a,#$e0
+	mov	SPC_PORT1,a			;return report type 
+	ret	
+
+ReportSpecialCmd:
+	mov	SPC_PORT1,#0			;clear report byte first
+	mov	a,SpecialReportCmd
+	mov	SPC_PORT2,a
+
+	mov	a,SpcReportType
+	or	a,#$e0
+	mov	SPC_PORT1,a			;return report type 
+	ret
+
+
+ConfigureEcho:
+  mov SPC_DSPA,#DSP_ESA      ;echo start adress
+  mov SPC_DSPD,#(ECHO.BUFFER >> 8)     ;80
+  mov SPC_DSPA,#DSP_EDL      ;echo delay
+  mov SPC_DSPD,#ECHO.DELAY
+  mov SPC_DSPA,#DSP_EFB      ;echo feedback
+  mov SPC_DSPD,#ECHO.FEEDBACK
+  mov SPC_DSPA,#DSP_EON      ;enable echo on all channels
+  mov SPC_DSPD,ChannelEchoEnable
+
+  ;-----------------------------------------
+  ; delay EDL*16ms before enabling echo
+  ; 16384 clks * EDL
+  ; EDL<<14 clks
+  ;
+  ; run loop EDL<<10 times
+  ; copied from https://github.com/mukunda-/snesmod/blob/master/driver/spc/sm_spc.asm
+  ;-----------------------------------------
+  mov TempBuffer2, #(ECHO.DELAY*4)+1
+  mov TempBuffer1, #0
+-
+    cmp a, [0]+y
+    decw  TempBuffer1
+    bne -
+
+  mov SPC_DSPA, #DSP_FLG  ; clear ECEN, enable echo
+  mov SPC_DSPD, #0
+
+  ret
+
+
+SoundEffectChannelDspRegLUT:
+	;.db	$40
+	;.db	$50
+	.db	$60
+	.db	$70
+
+SoundEffectChannelKofLUT:
+	;.db	$10
+	;.db	$20
+	.db	$40
+	.db	$80
+
+ChannelBitflagLUT:
+  .db $01
+  .db $02
+  .db $04
+  .db $08
+  .db $10
+  .db $20
+  .db $40
+  .db $80
+
+
+ChannelEnableMaskLUT:
+  .db $00
+  .db $01
+  .db $03
+  .db $07
+  .db $0f
+  .db $1f
+  .db $3f
+  .db $7f
+  .db $ff
+
+VibratoTable:
+	.incbin "src/audio/vibratotable.tbl"
+
+rawAmigaPeriods:
+	.include "src/audio/amigaperiodtable.tbl"
+
+PitchTable:
+	.include "src/audio/pitchtable1.tbl"
+	.incbin "src/audio/pitchtable2.tbl"
+spc.code.end:
+.DW 0
+.DW 0
+.DW CODE.START
+
+

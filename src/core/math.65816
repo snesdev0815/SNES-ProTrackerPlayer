@@ -1,0 +1,815 @@
+/**
+* assorted math support functions
+*
+*/
+
+.include "src/core/math.h"
+.section "core.math"
+
+/**
+* quantize value
+*
+* @param a<int,16bit>   curr.in
+* @param x<int,16bit>   max.in
+* @param y<int,8bit>   max.out
+*
+* @return a<int,16bit>  curr.out
+*/
+core.math.quant:
+  AX16
+  pha
+  phx
+  tya
+  and.w #$ff
+  xba
+  tay
+  pha
+
+  ;fake precision hack: if a,x equal, just return y directly.
+  lda 3,s
+  cmp 5,s
+  bne +
+    lda 1,s
+    bra ++
+
++
+
+  txa
+  tyx
+  jsr core.math.div
+  tax
+  lda 5,s
+  jsr core.math.mul
+
+++
+  ply
+  plx
+  plx
+
+  lsr a
+  lsr a
+  lsr a
+  lsr a
+  lsr a
+  lsr a
+  lsr a
+  lsr a
+
+  rts
+
+
+/**
+* get biggest of two unsigned input integers
+*
+* @param a<int,16bit>   integer 0
+* @param x<int,16bit>   integer 1
+*
+* @return a<int,16bit>	bigger integer
+*/
+core.math.max:
+  AX16
+  phx
+  cmp 1,s
+  bcs +
+    txa
++
+  plx
+	rts
+
+
+/**
+* get modulo
+*
+* @param a<int,16bit>   x,integer 0
+* @param x<int,16bit>   y,integer 1
+*
+* @return a<int,16bit>  modulo
+*/
+;(x % y = (x + (x*y)/100))
+core.math.mod:
+  AX16
+  pha
+  jsr core.math.mul
+  tax
+  lda #100
+  jsr core.math.div
+  clc
+  adc 1,s
+  sta 1,s
+  pla
+  rts
+
+/**
+* 16bit division x/a -> a,x
+*
+* @param a<int,16bit>   divisor
+* @param x<int,16bit>   dividend
+*
+* @return a<int,16bit>  result
+* @return x<int,16bit>  remainder
+*/
+core.math.div:
+  AX16
+  stz.w GLOBAL.math.scratch
+  ldy.w #1
+  cmp #0
+  bne +
+    TRIGGER_ERROR E_DivisionByZero
+
++
+-   asl a
+    bcs +
+      iny
+      cpy #17
+      bne -
+
++   ror a
+-   pha
+    txa
+    sec
+    sbc 1,s
+    bcc +
+      tax
+
++   rol.w GLOBAL.math.scratch
+    pla
+    lsr a
+    dey
+    bne -
+
+  lda.w GLOBAL.math.scratch
+  rts
+
+core.math.div.8bit:
+  AX16
+  cmp #0
+  bne +
+    TRIGGER_ERROR E_DivisionByZero
+
++
+  pha
+  txa
+  sta.l WRDIVL
+  pla
+  sep #$20
+  sta.l WRDIVB
+  rep #$31
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+  lda.l RDDIVL
+  rts
+
+/**
+* 16bit division x/a -> a,x
+* preserves sign of dividend
+*
+* @param a<int,16bit>   divisor
+* @param x<int,16bit>   dividend
+*
+* @return a<int,16bit>  result
+* @return x<int,16bit>  remainder
+*/
+core.math.div.signed:
+  php
+  rep #$31
+  stz.w GLOBAL.math.scratch
+  cpx.w #$8000
+  bcc +
+    ;dividend negative, negate
+    dec.w GLOBAL.math.scratch
++
+  ldy.w #1
+  cmp #0
+  bne +
+    TRIGGER_ERROR E_DivisionByZero
+
++
+-   asl a
+    bcs +
+      iny
+      cpy #17
+      bne -
+
++   ror a
+-   pha
+    txa
+    sec
+    sbc 1,s
+    bcc +
+      tax
+
++   rol.w GLOBAL.math.scratch
+    pla
+    lsr a
+    dey
+    bne -
+
+  lda.w GLOBAL.math.scratch
+  plp
+  rts
+
+
+/**
+* 8bit*8bit multiplication -> unsigned 16bit
+*
+*
+* @param a<int,8bit>   multiplicand a
+* @param x<int,8bit>   multiplicand b
+*
+* @return a<int,16bit>  result lower 16bit
+*/
+core.math.mul.8bit:
+  AX16
+  sep #$20
+  sta.l WRMPYA
+  txa
+  sta.l WRMPYB
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+  rep #$31
+  lda.l RDMPYL
+  rts
+
+/**
+* 8bit*8bit multiplication.
+*
+* Can't use this during writes to bg1h/v-scroll writes, especially through hdma!
+*
+* @param a<int,16bit>   multiplicand a
+* @param x<int,16bit>   multiplicand b
+*
+* @return a<int,16bit>  result lower 16bit
+* @return x<int,8bit>  result upper 8bit
+*/
+core.math.mul.signed.no_scroll:
+  AX16
+  sep #$20
+  sta.l M7A
+  xba
+  sta.l M7A
+  rep #$31
+  txa
+.if DEBUG == 1  
+  bit.w #$ff00
+  beq +
+    TRIGGER_ERROR E_ValueError
+
++  
+.endif
+  sep #$20
+  sta.l M7C
+  xba
+  sta.l M7C
+  rep #$31
+
+  lda.l MPYH
+  and.w #$ff
+  tax
+  lda.l MPYL
+  rts
+
+
+/**
+* 16bit*16bit multiplication
+*
+* @param a<int,16bit>   multiplicand a
+* @param x<int,16bit>   multiplicand b
+*
+* @return a<int,16bit>  result lower 16bit
+* @return x<int,16bit>  result upper 16bit
+*/
+core.math.mul:
+  AX16
+  sta.w (GLOBAL.math.scratch&$ffff)+0
+  stx.w (GLOBAL.math.scratch&$ffff)+2
+  ;use lower number as factor
+  cmp.w (GLOBAL.math.scratch&$ffff)+2
+  bcc +
+    pha
+    lda.w (GLOBAL.math.scratch&$ffff)+2
+    sta.w (GLOBAL.math.scratch&$ffff)+0
+    pla
+    sta.w (GLOBAL.math.scratch&$ffff)+2
+
++  
+
+  stz.w (GLOBAL.math.scratch&$ffff)+4
+  stz.w (GLOBAL.math.scratch&$ffff)+6
+  sep #$20
+  lda.b #0
+  ldx.w #$10 ; set binary count to 16 
+    
+-
+    lsr.w (GLOBAL.math.scratch&$ffff)+1      ;multiplier+1 ; divide multiplier by 2 
+    ror.w GLOBAL.math.scratch           ;multiplier
+    bcc +
+
+      lda.w (GLOBAL.math.scratch&$ffff)+6      ;product+2 ; get upper half of product and add multiplicand
+      clc
+      adc.w (GLOBAL.math.scratch&$ffff)+2      ;multiplicand
+      sta.w (GLOBAL.math.scratch&$ffff)+6      ; product+2
+      lda.w (GLOBAL.math.scratch&$ffff)+7      ; product+3 
+      adc.w (GLOBAL.math.scratch&$ffff)+3      ; multiplicand+1
+
++
+    ror ; rotate partial product 
+    sta.w (GLOBAL.math.scratch&$ffff)+7      ; product+3 
+    ror.w (GLOBAL.math.scratch&$ffff)+6      ; product+2
+    ror.w (GLOBAL.math.scratch&$ffff)+5      ; product+1 
+    ror.w (GLOBAL.math.scratch&$ffff)+4      ; product 
+    dex
+    bne -
+
+  rep #$31
+  lda.w (GLOBAL.math.scratch&$ffff)+4
+  ldx.w (GLOBAL.math.scratch&$ffff)+6
+  rts
+
+
+/**
+* get smallest of two unsigned input integers
+*
+* @param a<int,16bit>   integer 0
+* @param c<int,16bit>   integer 1
+*
+* @return a<int,16bit>  smaller integer
+*/
+core.math.min:
+    AX16
+    phx
+    cmp 1,s
+    bcc +
+      txa
+      
++
+    plx
+    rts
+
+
+/**
+* get bit of input number
+*
+* @param a<int,16bit>   integer 0
+*
+* @return a<int,16bit>  absolute value
+*/
+core.math.bit:
+  AX16
+  and.w #$f
+  tax
+  lda.w #1
+-
+  cpx.w #0
+  beq +
+    dex
+    asl a
+    bra -
+
++
+  rts
+
+
+/**
+* get absolute value
+*
+* @param a<int,16bit>   integer 0
+*
+* @return a<int,16bit>  absolute value
+*/
+core.math.abs:
+  AX16
+    bpl +
+      eor.w #$ffff
+      inc a
+
++
+    rts
+
+core.math.abs.8bit:
+    php
+    sep #$20
+    pha
+    pla
+    bpl +
+      eor.b #$ff
+      inc a
+
++
+    plp
+    rts
+
+/**
+* get a rough distance estimation between two points. Not accurate at all!
+* 
+* push to stack in this order:
+* @param 1<int,16bit>   point0 x (10,s)
+* @param 2<int,16bit>   point0 y (8,s)
+* @param 3<int,16bit>   point1 x (6,s)
+* @param 4<int,16bit>   point1 y (4,s)
+*
+*
+* @return a<int,16bit>  distance
+*/
+extend.math.roughDistance:
+    AX16
+    lda 10,s
+    sec
+    sbc 6,s
+    jsr core.math.abs
+    sta 6,s
+
+    lda 8,s
+    sec
+    sbc 4,s
+    jsr core.math.abs
+    clc
+    adc 6,s
+    rtl
+
+
+/**
+* convert 8-way direction to angle (degree)
+*
+* @param a<int,8bit>   direction, 0 means facing up
+*
+* @return a<int,8bit>  angle
+*/
+core.math.direction2angle:
+  AX16
+  cmp #MATH.2_PI
+  bcc +
+    pha
+    TRIGGER_ERROR E_MathLUTBadPos
++
+  asl a
+  tax
+  lda.l math.lut.direction2angle,x
+  rts
+
+/**
+* convert radian angle (degree) to sprite direction (4-way)
+*
+* @param a<int,8bit>   angle
+*
+* @return a<int,8bit>  direction, 2 bit
+*/
+
+core.math.angle2spriteDirection:
+  AX16
+  cmp #MATH.2_PI
+  bcc +
+    pha
+    TRIGGER_ERROR E_MathLUTBadPos
++
+  lsr a
+  lsr a
+  lsr a
+  lsr a
+
+  asl a
+  tax
+  lda.l math.lut.angle2spriteDirection,x
+  rts
+
+
+/**
+* get angle of normal vector based on input x/y coordinates (point where tile was hit).
+* normally, this should only concern tile edges, but this returns sane values for points inside tile aswell (due to lazy collision checks not happending every frame)
+*
+* @param 1<int,3bit>   tile x-pos
+* @param 2<int,3bit>   tile y-pos
+*
+* @return a<int,8bit>  angle
+*/
+core.math.tile.normal.angle:
+  AX16
+  phx
+  lda 6-1,s
+  and.w #$7
+  asl a
+  asl a
+  asl a
+  sta 6-1,s
+  
+  lda 8-1,s
+  and.w #$7
+  clc
+  adc 6-1,s
+  tax
+  lda.l math.tile.normal.angle.lut,x
+  and.w #$ff
+  plx
+  rts
+
+
+/**
+* get value from lookup table, range is 0pi-2pi
+*
+* @param a<int,8bit>   angle, 0-255
+*
+* @return a<int,16bit>  signed radiant
+*/
+core.math.sin:
+  AX16
+    cmp #MATH.2_PI
+    bcc +
+      pha
+      TRIGGER_ERROR E_MathLUTBadPos
++
+    asl a
+    phx
+    tax
+    lda.l math.lut.sin,x
+    plx
+    rts
+
+
+/**
+* get value from lookup table, range is 0pi-2pi
+*
+* @param a<int,8bit>   angle, 0-255
+*
+* @return a<int,16bit>  signed radiant
+*/
+core.math.cos:
+  AX16
+.if DEBUG == 1    
+    cmp #MATH.2_PI
+    bcc +
+      pha
+      TRIGGER_ERROR E_MathLUTBadPos
++
+.endif
+    asl a
+    phx
+    tax
+    lda.l math.lut.cos,x
+    plx
+    rts
+
+
+/**
+* get value from lookup table, range is 0pi-2pi
+*
+* @param a<int,8bit>   angle, 0-255
+*
+* @return a<int,16bit>  signed radiant
+*/
+core.math.tan:
+    php
+    rep #$31
+    cmp #MATH.2_PI
+    bcc +
+      pha
+      TRIGGER_ERROR E_MathLUTBadPos
++
+    asl a
+    phx
+    tax
+    lda.l math.lut.tan,x
+    plx
+    plp
+    rts
+
+;6bit entries, 4kb table
+core.math.atan2:
+  AX16
+.if DEBUG == 1    
+    cpy #MATH.ATAN2.MAX +1
+    bcc +
+      pha
+      TRIGGER_ERROR E_MathLUTBadPos
++
+    cpx #MATH.ATAN2.MAX +1
+    bcc +
+      pha
+      TRIGGER_ERROR E_MathLUTBadPos
++
+.endif
+    phy
+    tya
+    lsr a
+    and.w #$3f
+    pha
+    txa
+    lsr a
+    and.w #$3f
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    ora 1,s
+    ply
+    
+    phx
+    tax
+    lda.l math.lut.atan2,x
+    plx
+    ply
+    and.w #$ff
+    rts
+
+/**
+* get smallest of two unsigned input integers
+*
+* @param a<int,8bit>   data bank 
+* @param x<int,16bit>   data offset
+* @param y<int,16bit>   data length
+*
+* @return a<int,16bit>  hash
+*/
+core.math.hash:
+    php
+    phb
+    sep #$20
+    pha
+    plb
+    rep #$31
+    dey
+    dey
+    lda #0
+-
+      eor.w 0,x
+      inx
+      inx
+      dey
+      dey
+      bpl -
+      
+    plb
+    plp
+    rts
+
+core.math.half.signed:
+  bmi +
+    lsr a
+    rts
+
++
+    eor.w #$ffff
+    inc a
+    lsr a
+    eor.w #$ffff
+    inc a
+    rts
+
+core.math.quarter.signed:
+  bmi +
+    lsr a
+    lsr a
+    rts
+
++
+    eor.w #$ffff
+    inc a
+    lsr a
+    lsr a
+    eor.w #$ffff
+    inc a
+    rts
+
+/*
+*
+* @param a<int,8bit>    start bank
+* @param x<int,16bit>   number of banks to check
+*/
+core.math.checksum:
+  AX16
+  phd
+  pha
+  lda #ZP
+  tcd
+  pla
+  and.w #$ff
+  sta.b temp.misc+2
+  stz.b temp.misc
+  txa
+  clc
+  adc.b temp.misc+2
+  tax
+  pea 0
+  ldy #0
+-
+    lda.b [temp.misc],y
+    and.w #$ff
+    clc
+    adc 1,s
+    sta 1,s
+    iny
+    bne -
+
+    inc temp.misc+2
+    txa
+    cmp temp.misc+2
+    bne -
+  
+++
+  pla
+  pld
+  rts
+
+core.math.signed.dec:
+  AX16
+  bmi +
+    dec a
+    rts
+
++
+  inc a
+  rts
+
+;a: value
+;x: counter
+;return a: shifted value  
+core.math.signed.shiftLeft:
+  AX16
+-  
+  cpx.w #0
+  beq +
+    cmp #$8000
+    ror a
+    dex
+    bra -
+
++
+  rts
+
+core.math.hexToDecimal:
+  AX16
+  php
+  sed
+  pea 0
+  pha
+  and.w #$f
+  beq +
+    asl a
+    tax
+    lda.l hexToDecimal.nibble0,x
+    clc
+    adc 3,s
+    sta 3,s
+
++
+  lda 1,s
+  and.w #$f0
+  beq +
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    asl a
+    tax
+    lda.l hexToDecimal.nibble1,x
+    clc
+    adc 3,s
+    sta 3,s
+
++
+  lda 1,s
+  xba
+  and.w #$f
+  beq +
+    asl a
+    tax
+    lda.l hexToDecimal.nibble2,x
+    clc
+    adc 3,s
+    sta 3,s
+
++
+  lda 1,s
+  xba
+  and.w #$f0
+  beq +
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    asl a
+    tax
+    lda.l hexToDecimal.nibble3,x
+    clc
+    adc 3,s
+    sta 3,s
+
++
+  pla
+  pla
+  plp
+  rts
+
+.ends
