@@ -158,8 +158,7 @@ MainVolTargetL                  db
 MainVolTargetR                  db
 MainVolL                        db
 MainVolR                        db
-EchoVolL                        db
-EchoVolR                        db
+EnableEcho                      db
 ChannelEnable                   db
 ChannelEchoEnable               db
 

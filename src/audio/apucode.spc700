@@ -44,8 +44,7 @@ ClearVariables:
   mov MainVolTargetL,#AUDIO.VOLUME.FULL
   mov MainVolR,#AUDIO.VOLUME.FULL
   mov MainVolTargetR,#AUDIO.VOLUME.FULL
-  mov EchoVolL,#ECHO.VOLUME
-  mov EchoVolR,#ECHO.VOLUME
+  mov EnableEcho, #0
   mov ChannelEnable,#$3f
   mov ChannelEchoEnable,#$ff
 
@@ -77,6 +76,9 @@ MainLoop:
     mov y,a
     mov a,SPC_COUNTER1 ;clear 4bit counter
 -
+		push y
+		call !ProcessChannelVolumeTarget
+		pop y
       mov a,SPC_COUNTER1   ;wait for 2mS
       beq -
 
@@ -88,10 +90,11 @@ MainLoop:
 
   ;wait for counter 0 to become zero (tempo/bpm)
 -
+	call !ProcessChannelVolumeTarget
 	mov a,SPC_COUNTER0
-  beq -
+  	beq -
 
-  call !MainWaitLoop		
+  call !ProcessTick		
   call !SendReportData
   call !FadeMainVolume
 
@@ -103,6 +106,45 @@ MainLoop:
 
   call !ProcessCommand
   bra MainLoop
+
+ProcessChannelVolumeTarget:
+	mov a, CurrentChannel
+	clrc
+	adc a,#$10
+	cmp a, #CHANNEL.COUNT*$10
+	bcc +
+		mov a, #$00
+
++
+	mov CurrentChannel, a
+	lsr a
+	lsr a
+	lsr a
+	mov x,a
+
+	mov a,ChannelArrayPointer+x
+	mov y,(ChannelArrayPointer+1)+x
+	movw CurrentChDataLo,ya
+	mov y,#channel.current_volume
+	mov a,[CurrentChDataLo]+y
+
+	mov y,#channel.target_volume
+	cmp a,[CurrentChDataLo]+y
+	beq +
+		bmi ++
+			dec a
+			bra +++
+
+++
+			inc a
++++
+			mov y,#channel.current_volume
+			mov [CurrentChDataLo]+y,a
+			call  !SetVolumeOnlyy
+
++
+	ret	
+
 
 ProcessCommand:  
   ;get command
@@ -191,14 +233,14 @@ ResetHandler:
   	;jump to ipl rom:
 	jmp	!IPL_ROM
 
-MainWaitLoop:
+ProcessTick:
   mov a,$ef
   and a, #%00000101
   cmp a, #%00000101
-  beq MainWaitLoopSongPresent
+  beq ProcessTickSongPresent
 	ret
 	
-MainWaitLoopSongPresent:
+ProcessTickSongPresent:
 	inc	WaitCounter
 
 InnerWaitLoop:
@@ -209,17 +251,24 @@ InnerWaitLoop:
 	mov	y,NextRowChFadeOuts
 	mov	a,#DSP_KOF
 	movw	SPC_DSPA,ya
-	mov	a,SPC_COUNTER1	;clear 4bit counter
-	mov	y,#2
-KofWaitLoop:
-	mov	a,SPC_COUNTER1		;wait for 2mS
-	beq	KofWaitLoop
-  	;**************************************************
-	dbnz	y,KofWaitLoop
+
+	call !WaitForKof
 
 	call	 !ProcessNextRow
 
 	call	!PreTestRow
+	ret
+
+WaitForKof:
+	push y
+	mov	a,SPC_COUNTER1	;clear 4bit counter
+	mov	y,#3
+KofWaitLoop:
+	mov	a,SPC_COUNTER1		;wait for 2mS
+	beq	KofWaitLoop
+
+	dbnz	y,KofWaitLoop
+	pop y
 	ret
 
 UpdateTickBasedEffectsOnly:
@@ -236,7 +285,7 @@ UpdateTickBasedEffectsOnly:
       mov y,(ChannelArrayPointer+1)+x
       movw CurrentChDataLo,ya
 
-      call  !UpdateTargetVolumeTickBased
+      ;call  !UpdateTargetVolumeTickBased
       call  !CheckForTickBasedEffects
 
       clrc
@@ -247,12 +296,20 @@ UpdateTickBasedEffectsOnly:
 	mov	a,TickSampleStart
 	beq UpdateTickBasedEffectsOnlyNoRetrigger
 
-	mov	SPC_DSP,#DSP_KON
-	mov	SPC_DSPD,a							;retrigger recently started samples
-	
-	mov	TickSampleStart,#0
-UpdateTickBasedEffectsOnlyNoRetrigger:
+		mov	SPC_DSP,#DSP_KOF
+		mov	SPC_DSPD,TickSampleStart							;key-off channels that need sample retrigger and wait 2ms until they faded out a bit
+		
+		call !WaitForKof
 
+		mov	SPC_DSP,#DSP_KOF
+		mov	SPC_DSPD,#0
+
+		mov	SPC_DSP,#DSP_KON
+		mov	SPC_DSPD,TickSampleStart							;retrigger recently started samples
+		
+		mov	TickSampleStart,#0
+
+UpdateTickBasedEffectsOnlyNoRetrigger:
 	ret
 
 
@@ -392,8 +449,8 @@ SetNewSample:
 	mov	y,#SPCMOD.INSTRUMENT.VOLUME
 	mov	a,[TempBuffer1]+y
 	mov	CurrentVolume,a					;save to current volume and current channel volume
-	mov	y,#channel.current_volume
-	mov	[CurrentChDataLo]+y,a
+	;mov	y,#channel.current_volume
+	;mov	[CurrentChDataLo]+y,a
   mov y,#channel.target_volume
   mov [CurrentChDataLo]+y,a
 
@@ -1384,7 +1441,7 @@ TremolDivLoop:
 	ror	TempBuffer5
 	dbnz	y,TremolDivLoop
 	
-	mov	y,#channel.current_volume
+	mov	y,#channel.target_volume
 	mov	a,[CurrentChDataLo]+y
 	mov	TempBuffer1,a
 	mov	y,#channel.tremolo_position
@@ -1441,7 +1498,7 @@ TickbasedVolslide:
 	mov	TempBuffer1,a
 
 VolSlideUp:
-	mov	y,#channel.current_volume
+	mov	y,#channel.target_volume
 	mov	a,[CurrentChDataLo]+y
 	adc	a,TempBuffer1
 	cmp	a,#$40
@@ -1466,7 +1523,7 @@ TickbasedVolSlideDown:
 	mov	TempBuffer1,a
 
 VolSlideDown:
-	mov	y,#channel.current_volume
+	mov	y,#channel.target_volume
 	mov	a,[CurrentChDataLo]+y
 	sbc	a,TempBuffer1
 	bpl	VolSlideDownNoReset
@@ -1604,25 +1661,6 @@ SetSampleOffsetCalcLoopDone:
 	mov	SPC_DSPD,#SAMPLE.ProTracker.effect
 	ret
 
-/*
-PositionJump:
-	mov	y,#channel.effect_data
-	mov	a,[CurrentChDataLo]+y
-
-  call !setPosition
-
-	pop	a							;need to purge the stack a bit first
-	pop	a							;else, it would overflow slowly when using the pattern break command constantly
-	pop	a
-	pop	a
-	pop	a
-	pop	a
-	pop	a
-	pop	a
-
-	jmp	!MainLoop
-*/
-
 PositionJump:
 	mov	y,#channel.effect_data
 	mov	a,[CurrentChDataLo]+y
@@ -1650,7 +1688,8 @@ EffectSetVolume:
 
   mov y,#channel.target_volume
   mov [CurrentChDataLo]+y,a
-
+  ret
+/*
 ;effect 0xCx: fade volume very fast to avoid pops/clicks
 UpdateTargetVolumeTickBased:
   mov y,#channel.target_volume
@@ -1680,7 +1719,7 @@ UpdateTargetVolumeTickBased:
 
 +
   ret
-
+*/
 
 PatternBreak:
 	mov	y,#channel.effect_data
@@ -1815,27 +1854,31 @@ SetupDspRegsAndTimers:
   nop
   mov SPC_CONTROL,#$03      ;start timer(s)
 
+  call !ConfigureEcho
+
 	mov	a,#$00			;clear all dsp regs
 	mov	x,a
 
 DspRegClearLoop:
 	cmp	x,#DSP_FLG
-	bne	DspRegClearLoopEchoSkip
+	beq	+
+	cmp	x,#DSP_ESA
+	beq	+
+	cmp	x,#DSP_EDL
+	beq	+
+	cmp	x,#DSP_EFB
+	beq	+
+	cmp	x,#DSP_EON
+	beq	+
+		mov	SPC_DSPA,x
+		mov	SPC_DSPD,a
 
-	mov	SPC_DSPA,x			;disable echo
-	mov	SPC_DSPD,#$20
-	inc	x
-	
-DspRegClearLoopEchoSkip:	
-	mov	SPC_DSPA,x
-	mov	SPC_DSPD,a
++
 	inc	x
 	bpl	DspRegClearLoop
 
 	mov	SPC_DSPA,#DSP_DIR			;setup dsp regs
 	mov	SPC_DSPD,#(SAMPLE.SOURCE.START >> 8)			;this is the sample info loaction (dir)
-	mov	SPC_DSPA,#DSP_FLG
-	mov	SPC_DSPD,#$20
 	mov	SPC_DSPA,#DSP_MVOLL			;set master volume
 	mov	SPC_DSPD,MainVolL
 	mov	SPC_DSPA,#DSP_MVOLR
@@ -1882,7 +1925,6 @@ DspRegClearLoopEchoSkip:
 
 + pop a
 
-  call !ConfigureEcho
   ret
 
 
@@ -1962,16 +2004,22 @@ CutOffChannelGain:
 	or	a,CurrentChannel		;
 	mov	SPC_DSPA,a			;set gain	(winter gold example: $3d)
 	mov	SPC_DSPD,#%10011111		;decrease volume, 8mS	;old #%10111111
-	mov	y,#channel.current_volume
+	;mov	y,#channel.current_volume
 	mov	a,#0						;clear volume
-	mov	[CurrentChDataLo]+y,a
+	;mov	[CurrentChDataLo]+y,a
   mov y,#channel.target_volume
   mov [CurrentChDataLo]+y,a
 	ret					;return
 
+SetVolumeOnlyy:
+	mov TempBuffer1, a
+	bra SetVolumeOnly
+
 SetVolumeVibrato:
   mov a,CurrentVolume
-  bra +
+  mov y,#channel.target_volume
+  mov [CurrentChDataLo]+y,a
+	ret
 
 SetVolume:
   mov y,#channel.current_volume
@@ -2003,6 +2051,7 @@ SetVolume:
   mov a,[CurrentChDataLo]+y
   mov SPC_DSPD,a
 
+SetVolumeOnly:
   ;calculate channel panning left
   mov a,CurrentChannel
   mov y,#channel.panning
@@ -2279,17 +2328,24 @@ CheckForTickBasedEffectsNoteDelayDec:
 	ret		
 
 ReceiveSongHandler:
-	mov	SPC_DSPA,#$0c
-	mov	SPC_DSPD,#$00
-	mov	SPC_DSPA,#$1c
-	mov	SPC_DSPD,#$00
-	mov	SPC_DSPA,#$2c
-	mov	SPC_DSPD,#$00
-	mov	SPC_DSPA,#$3c
-	mov	SPC_DSPD,#$00
-	mov	SPC_DSPA,#$6c			;disable echo
-	mov	SPC_DSPD,#$20			
+	mov	y,#$ff
+	mov	a,#DSP_KOF
+	movw	SPC_DSPA,ya
+	
+	call !WaitForKof
 
+	mov	y,#0
+	mov	a,#DSP_KOF
+	movw	SPC_DSPA,ya
+
+	mov	SPC_DSPA,#DSP_MVOLL
+	mov	SPC_DSPD,#$00
+	mov	SPC_DSPA,#DSP_MVOLR
+	mov	SPC_DSPD,#$00
+	mov	SPC_DSPA,#DSP_EVOLL
+	mov	SPC_DSPD,#$00
+	mov	SPC_DSPA,#DSP_EVOLR
+	mov	SPC_DSPD,#$00
 	
 	mov	a,#COMMAND.UploadSong			;set "upload song command received"-flag	so cpu knows we're ready
 	mov	SPC_PORT0,a
@@ -2532,18 +2588,10 @@ PlaySoundEffect:
 
 	mov	a,!SoundEffectChannelKofLUT+x	;get channel key off bit
 	mov	TempBuffer6,a
-/*
-	mov	SPC_DSPA,#DSP_KOF				;key off current channel
-	mov	SPC_DSPD,a
-	
-  ;wait 8ms for key off to finish
-	mov	a,SPC_COUNTER1	;clear 4bit counter
-	mov	y,#4
-KofWaitLoop2:
-	mov	a,SPC_COUNTER1				;wait for 2mS
-	beq	KofWaitLoop2
-	dbnz	y,KofWaitLoop2
-*/
+
+	mov	SPC_DSP,#DSP_KOF
+	mov	SPC_DSPD,a							;key-off channel that need sample retrigger and wait 2ms until they faded out a bit
+
 	mov	x,TempBuffer5			;get pointer to dsp channel register set
 	
 	;multiply sample number by 16 to get sfx 
@@ -2646,6 +2694,8 @@ PlaySoundEffectCustomPitch:
 	
 	mov	SPC_DSPA,x
 	mov	SPC_DSPD,a
+		
+	call !WaitForKof
 
 	mov	SPC_DSPA,#DSP_KOF			;reset key off in case it's still active.(shouldn't, though)
 	mov	SPC_DSPD,#%00000000
@@ -2699,11 +2749,7 @@ UpdateVolEchoVariablesOnly:
 	mov	SPC_DSPD,MainVolL
 	mov	SPC_DSPA,#DSP_MVOLR
 	mov	SPC_DSPD,MainVolR
-	mov	SPC_DSPA,#DSP_EVOLL
-	mov	SPC_DSPD,EchoVolL
-	mov	SPC_DSPA,#DSP_EVOLR
-	mov	SPC_DSPD,EchoVolR
-	
+
 	ret
 
 ;set key on/key off here:
@@ -2731,13 +2777,8 @@ PatternBreakNoOverflow:
 	movw	CurrentPatternPointerLo,ya				;update current pattern pointer
 
 	mov	PatternBreakFlag,#0					;clear pattern break flag and exit
-	pop	a							;need to purge the stack a bit first
-	pop	a							;else, it would overflow slowly when using the pattern break command constantly
-	pop	a
-	pop	a
 	
-  	;is this really the correct amount? positionJump needed 2 more...
-	jmp	!MainLoop
+	bra ReturnMainLoop
 
 CheckPatternBreakExit:
 	mov a, PositionJumpTarget
@@ -2745,12 +2786,8 @@ CheckPatternBreakExit:
 		mov PositionJumpTarget, #0
 		dec a
 		call !setPosition
-		pop	a							;need to purge the stack a bit first
-		pop	a							;else, it would overflow slowly when using the pattern break command constantly
-		pop	a
-		pop	a
 		
-		jmp	!MainLoop
+		bra ReturnMainLoop
 
 
 +
@@ -2770,6 +2807,16 @@ CheckPatternBreakExit:
 	bpl	CheckPatternPositionPatternEnd
 
 	ret
+
+ReturnMainLoop:
+	pop	a							;need to purge the stack a bit first
+	pop	a							;else, it would overflow slowly when using the pattern break command constantly
+	pop	a
+	pop	a
+	
+	call !PreTestRow
+	
+	jmp	!MainLoop
 
 CheckPatternPositionPatternEnd:
 	inc	CurrentPatternNumber		;increment position in current pattern
@@ -2870,6 +2917,12 @@ ClearChannelArrayLoop:
   mov y,#channel.panning
   mov [TempBuffer1]+y,a
 
+  mov a, #AUDIO.VOLUME.FULL
+  mov y,#channel.target_volume
+  mov [TempBuffer1]+y,a
+  mov y,#channel.current_volume
+  mov [TempBuffer1]+y,a
+
   mov a,#channel.current_channelmask+1  ;get amount of bytes per array and add to current adress
   mov y,#0
   addw  ya,TempBuffer1
@@ -2900,7 +2953,7 @@ SetSongChannelMask:
 
 
 SetSongSpeed:
-  mov	a,SPC_PORT1			;get new speed
+	mov	a,SPC_PORT1			;get new speed
   call !Command0x0F
   ret
 
@@ -2919,22 +2972,16 @@ CommandSetPatternPosition:
   ret
 
 CommandSetEchoVolume:
+  mov x, #0
   mov a,SPC_PORT1
-  mov x,SPC_PORT2
-  call !setEchoVolume
+  beq +
+	mov x, #1
+
++
+  mov EnableEcho, x
   inc a
   mov SPC_PORT1,a
   mov SPC_PORT0,#COMMAND.SetEchoVolume     ;ack command
-  ret
-
-setEchoVolume:
-  mov EchoVolL, a
-  mov EchoVolR, x
-  mov SPC_DSPA,#DSP_EVOLL
-  mov SPC_DSPD,EchoVolL
-  mov SPC_DSPA,#DSP_EVOLR
-  mov SPC_DSPD,EchoVolR
-
   ret
 
 
@@ -2973,8 +3020,6 @@ SetMasterVolume:
     mov SPC_DSPA, #DSP_MVOLR
     mov SPC_DSPD, MainVolR
 
-    call !fadeEchoVolume
-
 +
   and MainVolTargetL, #$7f
   and MainVolTargetR, #$7f
@@ -2987,57 +3032,6 @@ SetMasterVolume:
   mov SPC_PORT0, #0                  ;ack
   ret
 
-;make sure echo volume is never bigger than main volume
-fadeEchoVolume:
-  mov a, EchoVolL
-  mov x, MainVolL
-  call !adjustReferenceVolume
-  mov EchoVolL,a
-  mov SPC_DSPA,#DSP_EVOLL
-  mov SPC_DSPD,EchoVolL
-
-  mov a, EchoVolR
-  mov x, MainVolR
-  call !adjustReferenceVolume 
-  mov EchoVolR,a
-  mov SPC_DSPA,#DSP_EVOLR
-  mov SPC_DSPD,EchoVolR
-  ret
-
-abs:
-  cmp a,#$80
-  bcc +
-    eor a,#$ff
-    inc a
-
-+
-  ret
-
-adjustReferenceVolume:
-  mov TempBuffer1,a
-  call !abs
-  mov TempBuffer3,a
-  mov TempBuffer2,x
-  mov a,x
-  call !abs
-  mov TempBuffer4,a
-  cmp TempBuffer3, TempBuffer4
-  beq +
-  bcc +
-    mov a,TempBuffer1
-    bmi ++
-      mov a,TempBuffer4
-      ret
-
-++
-    mov a,TempBuffer4
-    eor a,#$ff
-    inc a
-    ret
-
-+
-  mov a, TempBuffer1
-  ret
 
 FadeMainVolume:
   cmp MainVolTargetL, MainVolL
@@ -3051,6 +3045,8 @@ FadeMainVolume:
 +++
     mov SPC_DSPA, #DSP_MVOLL
     mov SPC_DSPD, MainVolL
+
+
 +
   cmp MainVolTargetR, MainVolR
   beq +
@@ -3063,9 +3059,49 @@ FadeMainVolume:
 +++
     mov SPC_DSPA, #DSP_MVOLR
     mov SPC_DSPD, MainVolR
+
+
 +
-  call !fadeEchoVolume
+	mov x, MainVolL
+	mov a, MainVolR
+	eor a, #$ff
+	inc a
+	mov y, a
+	mov a, EnableEcho
+	bne +
+		mov x,#0
+		mov y,#0
+
++
+	mov	SPC_DSPA,#DSP_EVOLL
+	mov	SPC_DSPD,x
+
+	mov	SPC_DSPA,#DSP_EVOLR
+	mov	SPC_DSPD,y
+
   ret
+
+
+fadeVolume:
+	clrc
+	adc a,#$80
+	mov TempBuffer1,a
+	mov a,x
+	clrc
+	adc a,#$80
+	mov TempBuffer2,a
+	cmp TempBuffer2, TempBuffer1
+	beq +
+	bcc ++
+		inc TempBuffer1
+		bra +
+++
+		dec TempBuffer1
++
+	mov a,TempBuffer1
+	setc
+	sbc a,#$80
+	ret
 
 SendReportData:
 	mov	a,SpcReportType		;get report type
