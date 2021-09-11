@@ -26,10 +26,10 @@ SamplePackLUT:
 .Section "SongLUT" superfree
 SongLUT:
  .db 0,0,0
- PTRLONG SongLUT Song.mo_lgnd
+ PTRLONG SongLUT Song.walkman_snippers
 .ends
 
-    SONG mo_lgnd mo_lgnd
+    SONG walkman_snippers walkman_snippers
 
 .enum 0 export
     AUDIO.SAMPLEPACK.MAX ds 0

@@ -44,7 +44,7 @@ SLOT 7 $7f4400  ;upper ram bank
 .def USE_FLASH_SAVE 0	;if enabled, game expects to reside on mx29f040 4mbit flash ROM and will save to it aswell, no need for additional SRAM. However, game will not boot if it fails to detect flash ROM. Also, saving progress will corrupt header checksum.
 
 
-.def ROMBANKS 1	;3.
+.def ROMBANKS 2	;3.
 
 .ROMBANKSIZE $10000    ; Every ROM bank is 64 KBytes in size, also necessary.
 .ROMBANKS ROMBANKS           ; 256Mbits

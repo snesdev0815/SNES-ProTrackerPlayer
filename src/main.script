@@ -36,7 +36,7 @@
   pei (obj.textlayer+2)
   pei (iterator.self)
   pei (iterator.self+2)
-  SCRIPT_NEW option.command.callback.CLS.PTR obj.optionSong $1c $44 OPTION.COMMAND.PLAY_SONG Song.mo_lgnd.PTR text.misc.song
+  SCRIPT_NEW option.command.callback.CLS.PTR obj.optionSong $1c $44 OPTION.COMMAND.PLAY_SONG Song.walkman_snippers.PTR text.misc.song
   pla
   pla
   pla
